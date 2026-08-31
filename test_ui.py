@@ -20,6 +20,7 @@ def seed(page, entries, trips=None, templates=None, cardDue=None):
         }));
     }""", [entries, trips or [], templates or [], cardDue or {}])
     page.reload()
+    page.wait_for_function("() => !!window.__app")
     page.click("#nav button[data-v='stats']")
 
 def E(id, date, cat, amount, **kw):
@@ -42,7 +43,7 @@ with sync_playwright() as p:
 
     print("\n── 載入與骨架 ──")
     page.goto(URL)
-    page.wait_for_selector("header h1")
+    page.wait_for_function("() => !!window.__app")
     check("標題正確", page.inner_text("header h1") == "消費統計")
     check("四個分頁按鈕", page.locator("#nav button").count() == 4)
     check("開 App 落在記一筆", page.locator("#v-add").is_visible())
@@ -175,6 +176,38 @@ with sync_playwright() as p:
         check("月中只算到今天", ("至 %d 日" % DAY) in detail)
     else:
         print("  · 今天是月底第 %d 天，同期比對測試略過（需要今天之後還有日子）" % DAY)
+
+    print("\n── 統計圖表 ──")
+    seed(page, [E('g%d' % i, m + '-05', '餐飲', 3000 + i * 500) for i, m in
+                enumerate(['2026-05', '2026-06', '2026-07'])] +
+               [E('h%d' % i, m + '-06', '交通', 1000) for i, m in
+                enumerate(['2026-05', '2026-06', '2026-07'])] +
+               [E('now1', '2026-08-05', '餐飲', 6000), E('now2', '2026-08-06', '交通', 900),
+                dict(id='inc', type='income', date='2026-08-01', cat='薪金', sub='月薪',
+                     pay='現金', acct='中銀澳門', currency='MOP', amount=60000, rate=1,
+                     tripId=None, createdAt='2026-01-01T00:00:00Z')])
+    page.evaluate("window.__app.setYM('2026-08')")
+    names = page.locator("#v-stats .eyebrow").all_inner_texts()
+    check("有近六個月趨勢圖", any("近六個月趨勢" in x for x in names))
+    check("有偏差圖", any("與近三月同期的偏差" in x for x in names))
+    check("兩張圖都是 SVG", page.locator("#v-stats svg").count() == 2)
+    st4 = page.inner_text("#v-stats")
+    check("趨勢圖標示收入與支出", "收入" in st4 and "支出均" in st4)
+    check("趨勢圖標示旅行檢視", "不含旅行" in st4)
+    check("偏差圖標出基準兩側", "低於基準" in st4 and "高於基準" in st4)
+
+    seed(page, [E('s1', '2026-08-05', '餐飲', 100)])
+    page.evaluate("window.__app.setYM('2026-08')")
+    names2 = page.locator("#v-stats .eyebrow").all_inner_texts()
+    check("只有一個月時不畫趨勢圖", not any("近六個月趨勢" in x for x in names2))
+    check("樣本不足時不畫偏差圖", not any("偏差" in x for x in names2))
+
+    seed(page, [E('t%d' % i, m + '-05', '餐飲', 3000) for i, m in
+                enumerate(['2026-06', '2026-07'])] +
+               [E('t9', '2026-08-05', '餐飲', 3000)])
+    page.evaluate("window.__app.setYM('2026-08')")
+    check("兩個月就開始畫趨勢圖", page.locator("#v-stats svg").count() >= 1)
+    check("但偏差圖仍要滿三個月", "與近三月同期的偏差" not in page.inner_text("#v-stats"))
 
     print("\n── 點大類展開子類 ──")
     seed(page, [
@@ -367,6 +400,7 @@ with sync_playwright() as p:
         }));
     }""")
     page.reload()
+    page.wait_for_function("() => !!window.__app")
     page.click("#nav button[data-v='stats']")
     page.evaluate("window.__app.setYM('2026-08')")
     mig = page.evaluate("JSON.parse(localStorage.getItem('expanal_v1'))")
@@ -452,6 +486,68 @@ with sync_playwright() as p:
     check("說明為何寫已記錄", "不代表你花掉的" in txt)
     check("說明信用卡雙軌", "就雙重計算" in txt)
     check("說明 CSV 匯入規矩", "不採用「澳門幣金額」那一欄" in txt)
+
+    print("\n── CSV 日期格式的把關 ──")
+    seed(page, [])
+    def csv_dates(dates):
+        head = "日期,型別,大類,子類,帳戶層,帳戶,幣別,原幣金額,匯率"
+        return "\r\n".join([head] + [d + ",支出,餐飲,午餐,現金,現鈔,MOP,100,1" for d in dates])
+
+    def do_import(text):
+        page.click("#nav button[data-v='set']")
+        page.set_input_files("#importCSVFile", files=[{
+            "name": "t.csv", "mimeType": "text/csv",
+            "buffer": ("\ufeff" + text).encode("utf-8")}])
+        page.wait_for_selector(".modal")
+        return page.inner_text(".modal")
+
+    txt = do_import(csv_dates(["26/08/2026", "03/04/2026"]))
+    check("日月年可自動判斷", "日期偵測為 日／月／年" in txt)
+    check("判斷後兩筆都可匯入", "2 筆" in txt)
+    page.click(".modal button:has-text('取消')")
+
+    txt = do_import(csv_dates(["08/26/2026", "03/04/2026"]))
+    check("月日年可自動判斷", "日期偵測為 月／日／年" in txt)
+    page.click(".modal button:has-text('取消')")
+
+    txt = do_import(csv_dates(["03/04/2026", "05/06/2026"]))
+    check("真有歧義時擋下", "分不出日月" in txt)
+    check("歧義時給出解法", "yyyy-mm-dd" in txt)
+    page.click(".modal button:has-text('取消')")
+
+    txt = do_import(csv_dates(["26/08/2026", "08/26/2026"]))
+    check("順序矛盾時擋下", "矛盾" in txt)
+    page.click(".modal button:has-text('取消')")
+
+    txt = do_import(csv_dates(["2026-08-01", "46265"]))
+    check("年在前與 Excel 序號都吃", "2 筆" in txt)
+    check("年在前不顯示偵測提示", "日期偵測為" not in txt)
+    page.click(".modal button:has-text('匯入這 2 筆')")
+    page.wait_for_selector(".toast")
+    dates = page.evaluate("JSON.parse(localStorage.getItem('expanal_v1')).entries.map(e=>e.date).sort()")
+    check("序號正確換算成日期", dates == ["2026-08-01", "2026-08-31"])
+
+    print("\n── 版本與快取 ──")
+    seed(page, [])
+    page.click("#nav button[data-v='set']")
+    build = page.evaluate("window.__BUILD")
+    check("頁面帶版本戳", bool(build) and build != "dev")
+    check("設定頁顯示版本號", build in page.inner_text("#v-set"))
+    check("有強制重新載入的出口", page.locator("#btnForceRefresh").count() == 1)
+    check("提醒版本號要一致", "才是同一份" in page.inner_text("#v-set"))
+    sw_src = page.evaluate("""async () => {
+        const r = await fetch('sw.js', {cache:'no-store'});
+        return await r.text();
+    }""")
+    check("sw 快取名稱帶同一個版本戳", ("const BUILD = '%s';" % build) in sw_src)
+    check("HTML 走網路優先", "isDocument" in sw_src and "fetch(e.request).then" in sw_src)
+    check("啟用時清掉舊快取", "caches.delete(k)" in sw_src)
+    idx = page.evaluate("""async () => {
+        const r = await fetch('index.html', {cache:'no-store'});
+        return await r.text();
+    }""")
+    check("manifest 連結帶版本", ("manifest.webmanifest?v=%s" % build) in idx)
+    check("圖示連結帶版本", ("icon-192.png?v=%s" % build) in idx)
 
     print("\n── 月份切換 ──")
     page.click("#nav button[data-v='stats']")

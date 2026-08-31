@@ -56,6 +56,139 @@ function hint(t){ var d=el('div','tiny muted'); d.style.marginBottom='8px'; d.te
 function callout(kind, text){
   var d = el('div','callout'+(kind==='info'?' info':'')); d.textContent = text; return d;
 }
+var NS='http://www.w3.org/2000/svg';
+function svgEl(t, attrs){
+  var e=document.createElementNS(NS,t);
+  for(var k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function svgText(x,y,txt,attrs){
+  var t=svgEl('text', Object.assign({x:x,y:y}, attrs||{}));
+  t.textContent=txt; return t;
+}
+
+/* 月度趨勢：收入與支出雙柱，虛線為有資料月份的支出平均 */
+function trendChart(){
+  var td = isCurrentMonth() ? throughDay() : null;
+  var partial = !!(td && td < C.daysInMonth(ym));   // 月底時 1–31 日就是整月，不必特別聲明
+  var ser = C.monthlySeries(S.entries, ym, 6, tripMode, td);
+  if(ser.monthsWithData < 2) return null;
+
+  var card = el('div','card');
+  card.appendChild(el('p','eyebrow','近六個月趨勢'+(partial? '（各月 1–'+td+' 日）':'')));
+
+  var W=600, H=210, padL=8, padR=8, padT=14, padB=26;
+  var plotH = H-padT-padB, plotW = W-padL-padR;
+  var svg = svgEl('svg', {viewBox:'0 0 '+W+' '+H,
+                          preserveAspectRatio:'xMidYMid meet', role:'img'});
+  svg.style.width='100%'; svg.style.height='auto'; svg.style.display='block';
+  svg.setAttribute('aria-label','近六個月收入與支出趨勢');
+  var max = ser.max || 1;
+  var slot = plotW/ser.rows.length;
+  var bw = Math.min(26, slot*0.30);
+
+  // 平均支出基準線
+  if(ser.avgExpense>0){
+    var ay = padT + plotH - (ser.avgExpense/max)*plotH;
+    svg.appendChild(svgEl('line',{x1:padL,y1:ay,x2:W-padR,y2:ay,
+      stroke:'var(--sky-deep)','stroke-width':1,'stroke-dasharray':'4 4','opacity':.5}));
+  }
+
+  ser.rows.forEach(function(r,i){
+    var cx = padL + slot*i + slot/2;
+    if(!r.has){
+      svg.appendChild(svgText(cx, padT+plotH-6, '無資料',
+        {'text-anchor':'middle','font-size':9,fill:'var(--mute)'}));
+    } else {
+      var ih = (r.income/max)*plotH, eh = (r.expense/max)*plotH;
+      svg.appendChild(svgEl('rect',{x:cx-bw-2, y:padT+plotH-ih, width:bw, height:Math.max(ih,1),
+        fill:'var(--s6)', rx:2}));
+      svg.appendChild(svgEl('rect',{x:cx+2, y:padT+plotH-eh, width:bw, height:Math.max(eh,1),
+        fill: r.isCurrent? 'var(--s1)':'var(--s3)', rx:2}));
+      svg.appendChild(svgText(cx+2+bw/2, padT+plotH-eh-4, money(r.expense),
+        {'text-anchor':'middle','font-size':9.5,fill:'var(--ink)','font-family':'var(--f-num)'}));
+    }
+    svg.appendChild(svgText(cx, H-9, r.ym.slice(5)+' 月',
+      {'text-anchor':'middle','font-size':10,
+       fill: r.isCurrent? 'var(--sky-deep)':'var(--mute)',
+       'font-weight': r.isCurrent? 700:400}));
+  });
+  svg.appendChild(svgEl('line',{x1:padL,y1:padT+plotH,x2:W-padR,y2:padT+plotH,
+    stroke:'var(--hair)','stroke-width':1}));
+
+  var box = el('div',''); box.style.paddingTop='10px'; box.appendChild(svg);
+  card.appendChild(box);
+
+  var lg = el('div','legend');
+  var l1=el('span','');
+  l1.appendChild(swatch('var(--s6)')); l1.appendChild(el('span','','收入　'));
+  l1.appendChild(swatch('var(--s3)')); l1.appendChild(el('span','','支出'));
+  if(ser.avgExpense>0) l1.appendChild(el('span','','　┄ 支出均 '+money(ser.avgExpense)));
+  lg.appendChild(l1);
+  lg.appendChild(el('span','', tripMode==='exclude'?'不含旅行':(tripMode==='only'?'只看旅行':'含旅行')));
+  card.appendChild(lg);
+  if(partial){
+    card.appendChild(el('div','tiny muted','本月只到 '+td+' 日，往月也只取 1–'+td+' 日，兩邊才比得下去。'));
+  }
+  return card;
+}
+function swatch(color){
+  var s2=el('span',''); s2.style.cssText='display:inline-block;width:9px;height:9px;border-radius:2px;'+
+    'background:'+color+';margin-right:4px;vertical-align:middle';
+  return s2;
+}
+
+/* 偏差圖：以近三月同期均值為零線，向右超支、向左低於基準 */
+function deviationChart(){
+  var dv = C.deviationRows(S.entries, ym, throughDay(), tripMode);
+  if(!dv.ready) return null;
+
+  var card = el('div','card');
+  card.appendChild(el('p','eyebrow','與近三月同期的偏差'));
+
+  var rowH=26, W=600, padL=76, padR=64, top=16;
+  var H = top + dv.rows.length*rowH + 8;
+  var mid = padL + (W-padL-padR)/2;
+  var half = (W-padL-padR)/2;
+  var scale = Math.max(dv.maxAbs, 0.3);        // 至少 ±30%，避免小偏差被放大成滿格
+
+  var svg = svgEl('svg',{viewBox:'0 0 '+W+' '+H,
+                         preserveAspectRatio:'xMidYMid meet', role:'img'});
+  svg.style.width='100%'; svg.style.height='auto'; svg.style.display='block';
+  svg.setAttribute('aria-label','各大類與近三月同期均值的偏差');
+  svg.appendChild(svgText(mid, 10, '基準', {'text-anchor':'middle','font-size':9,fill:'var(--mute)'}));
+  svg.appendChild(svgText(mid-half, 10, '低於基準', {'text-anchor':'start','font-size':9,fill:'var(--green)'}));
+  svg.appendChild(svgText(mid+half, 10, '高於基準', {'text-anchor':'end','font-size':9,fill:'var(--red)'}));
+
+  dv.rows.forEach(function(r,i){
+    var y = top + i*rowH;
+    var w = Math.min(Math.abs(r.deltaPct)/scale, 1) * half;
+    var up = r.deltaPct >= 0;
+    var color = r.flag ? 'var(--red)' : (up ? 'var(--s4)' : 'var(--green)');
+    svg.appendChild(svgEl('rect',{
+      x: up ? mid : mid-w, y: y+4, width: Math.max(w,1.5), height: rowH-13,
+      fill: color, rx:2, opacity: r.muted? .45 : 1
+    }));
+    svg.appendChild(svgText(padL-6, y+rowH/2+1, r.cat,
+      {'text-anchor':'end','font-size':11,fill:'var(--ink)','dominant-baseline':'middle'}));
+    svg.appendChild(svgText(W-padR+6, y+rowH/2+1,
+      (up?'+':'−')+Math.abs(r.deltaPct*100).toFixed(0)+'%',
+      {'text-anchor':'start','font-size':10.5,'font-family':'var(--f-num)',
+       fill: r.flag?'var(--red)':'var(--mute)','dominant-baseline':'middle',
+       'font-weight': r.flag?700:400}));
+  });
+  svg.appendChild(svgEl('line',{x1:mid,y1:top,x2:mid,y2:H-6,stroke:'var(--ink)','stroke-width':1.2}));
+
+  var box = el('div',''); box.style.paddingTop='10px'; box.appendChild(svg);
+  card.appendChild(box);
+  var muted = dv.rows.filter(function(r){ return r.muted; }).length;
+  if(muted){
+    card.appendChild(el('div','tiny muted','淡色那幾條月均未達 '+C.ANOMALY_FLOOR+
+      ' MOP，不會觸發提示，但偏差照樣畫給你看。'));
+  }
+  return card;
+}
+
 function subPanel(cat){
   var b = C.subBreakdown(S.entries, ym, cat, throughDay(), tripMode, onlyTripId, 3);
   var wrap = el('div','subpanel');
@@ -215,6 +348,10 @@ function renderStats(){
     host.appendChild(oc);
   }
 
+  /* 月度趨勢 */
+  var tc2 = trendChart();
+  if(tc2) host.appendChild(tc2);
+
   /* 地層剖面 */
   var sc = el('div','card');
   var eb = el('p','eyebrow');
@@ -291,6 +428,12 @@ function renderStats(){
     }
   }
   host.appendChild(sc);
+
+  /* 偏差圖 */
+  if(tripMode==='exclude'){
+    var dvc = deviationChart();
+    if(dvc) host.appendChild(dvc);
+  }
 
   /* 對照明細 */
   if(tripMode==='exclude' && rep.rows.length){
@@ -871,6 +1014,22 @@ function renderSet(){
     var b=el('div','tiny muted'); b.textContent=p[1];
     d.appendChild(t); d.appendChild(b); rc.appendChild(d);
   });
+  var vb=el('div',''); vb.style.marginBottom='10px';
+  var vt=el('div',''); vt.style.fontWeight='700'; vt.style.fontSize='13px'; vt.style.color='var(--sky-deep)';
+  vt.textContent='版本';
+  var vv=el('div','tiny muted');
+  vv.innerHTML='';
+  vv.appendChild(el('span','num', BUILD));
+  vv.appendChild(el('span','', '　手機與電腦看到的版本號一樣，才是同一份。'));
+  vb.appendChild(vt); vb.appendChild(vv);
+  rc.appendChild(vb);
+  var refresh=el('button','btn ghost sm','清除快取並重新載入');
+  refresh.id='btnForceRefresh';
+  refresh.onclick=function(){
+    if(confirm('會清掉離線快取並重新下載最新版本。你的紀錄不受影響（存在別的地方）。繼續？')) forceRefresh();
+  };
+  rc.appendChild(refresh);
+
   var wipe=el('button','btn danger sm','清除全部資料');
   wipe.onclick=function(){
     if(confirm('清除全部資料？建議先匯出備份。此動作無法復原。')){
@@ -1013,6 +1172,26 @@ function openCSVReport(plan){
     sh.appendChild(ec);
   }
 
+  var ORDER_TXT = {
+    ymd:'年／月／日', dmy:'日／月／年', mdy:'月／日／年',
+    none:'年／月／日', ambiguous:'無法判斷', conflict:'檔案內互相矛盾'
+  };
+  if(plan.dateOrder && plan.dateOrder!=='none'){
+    var dc2 = el('div', (plan.dateOrder==='dmy'||plan.dateOrder==='mdy') ? 'callout info' : 'callout');
+    dc2.style.margin='12px 0 0';
+    if(plan.dateOrder==='dmy' || plan.dateOrder==='mdy'){
+      dc2.textContent = '日期偵測為 '+ORDER_TXT[plan.dateOrder]+
+        '（依整個檔案判斷，不是逐列猜）。若這不對，請在 Excel 把日期欄改成 2026-08-01 再存一次。';
+    } else if(plan.dateOrder==='ambiguous'){
+      dc2.textContent = '日期分不出日月：整個檔的日與月都在 12 以內，無法判斷順序。'+
+        '請在 Excel 把日期欄格式改成 yyyy-mm-dd 再存一次 CSV。';
+    } else {
+      dc2.textContent = '日期順序矛盾：同一個檔裡既有日／月／年也有月／日／年。'+
+        '請在 Excel 統一成 yyyy-mm-dd 再存一次。';
+    }
+    sh.appendChild(dc2);
+  }
+
   var news=[];
   Object.keys(plan.newAccounts).forEach(function(L){
     news.push('新增'+L+'帳戶：'+plan.newAccounts[L].join('、'));
@@ -1113,10 +1292,45 @@ Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), funct
 load();
 go('add');
 
+/* ── 版本與更新 ───────────────────────────────────────── */
+var BUILD = window.__BUILD || 'dev';
+var swReg = null, reloading = false;
+
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){
-    navigator.serviceWorker.register('sw.js').catch(function(){});
+    navigator.serviceWorker.register('sw.js', { updateViaCache:'none' })
+      .then(function(reg){
+        swReg = reg;
+        reg.update().catch(function(){});
+        // 每次回到前景再檢查一次，避免手機長期掛著舊版
+        document.addEventListener('visibilitychange', function(){
+          if(!document.hidden && swReg) swReg.update().catch(function(){});
+        });
+      })
+      .catch(function(){});
+    navigator.serviceWorker.addEventListener('controllerchange', function(){
+      if(reloading) return;
+      reloading = true;
+      location.reload();
+    });
   });
+}
+
+function forceRefresh(){
+  var done = function(){ location.replace(location.pathname + '?r=' + Date.now()); };
+  var jobs = [];
+  if('caches' in window){
+    jobs.push(caches.keys().then(function(ks){
+      return Promise.all(ks.map(function(k){ return caches.delete(k); }));
+    }));
+  }
+  if('serviceWorker' in navigator){
+    jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){
+      return Promise.all(rs.map(function(r){ return r.unregister(); }));
+    }));
+  }
+  reloading = true;
+  Promise.all(jobs).then(done, done);
 }
 window.__app = { S:S, go:go, setYM:function(v){ ym=v; renderAll(); } };
 })();

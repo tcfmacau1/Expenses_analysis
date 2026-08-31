@@ -345,9 +345,9 @@ t('接受三種日期分隔', () => {
   eq(C.normDate('2026.8.1'), '2026-08-01');
 });
 t('看不懂的日期回 null，不猜', () => {
-  eq(C.normDate('01/08/2026'), null);
-  eq(C.normDate('8月1日'), null);
-  eq(C.normDate('45870'), null);
+  eq(C.normDate('01/08/2026'), null);   // 沒有整檔順序就不解年在後的寫法
+  eq(C.normDate('8月1日'), null);        // 缺年份
+  eq(C.normDate('2026/8'), null);
 });
 t('月份日期超界回 null', () => { eq(C.normDate('2026-13-01'), null); eq(C.normDate('2026-08-32'), null); });
 
@@ -554,6 +554,176 @@ t('轉帳不進子類明細', () => {
 t('可調整取前幾項', () => {
   const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all', null, 5);
   eq(b.top.length, 5); eq(b.rest.items, 0);   // 餐飲共 5 個子類，取 5 就沒有其餘
+});
+
+
+console.log('\n── CSV 日期格式 ──');
+t('年在前一律接受', () => {
+  eq(C.normDate('2026-08-01', 'none'), '2026-08-01');
+  eq(C.normDate('2026/8/1', 'none'), '2026-08-01');
+  eq(C.normDate('2026.8.1', 'none'), '2026-08-01');
+});
+t('中文年月日', () => eq(C.normDate('2026年8月1日', 'none'), '2026-08-01'));
+t('Excel 序號', () => eq(C.normDate('46265', 'none'), '2026-08-31'));
+t('序號範圍外不當日期', () => eq(C.normDate('99999', 'none'), null));
+t('日在前需要 dmy 才解得開', () => {
+  eq(C.normDate('26/08/2026', 'dmy'), '2026-08-26');
+  eq(C.normDate('26/08/2026', 'ambiguous'), null);
+});
+t('月在前需要 mdy', () => eq(C.normDate('08/26/2026', 'mdy'), '2026-08-26'));
+t('同一字串兩種順序解出不同日期', () => {
+  eq(C.normDate('03/04/2026', 'dmy'), '2026-04-03');
+  eq(C.normDate('03/04/2026', 'mdy'), '2026-03-04');
+});
+t('月份超界擋掉', () => eq(C.normDate('2026-13-01', 'none'), null));
+t('亂寫的字串', () => eq(C.normDate('下星期二', 'none'), null));
+
+console.log('\n── 日期順序偵測 ──');
+t('沒有年在後的列就不必偵測', () => eq(C.detectDateOrder(['2026-08-01', '2026/8/2']), 'none'));
+t('首欄大於 12 釘死日月年', () => eq(C.detectDateOrder(['26/08/2026', '03/04/2026']), 'dmy'));
+t('次欄大於 12 釘死月日年', () => eq(C.detectDateOrder(['08/26/2026', '03/04/2026']), 'mdy'));
+t('全部小於 12 就是歧義', () => eq(C.detectDateOrder(['03/04/2026', '05/06/2026']), 'ambiguous'));
+t('兩種證據都有就是矛盾', () => eq(C.detectDateOrder(['26/08/2026', '08/26/2026']), 'conflict'));
+t('一列證據就足以定全檔', () => eq(C.detectDateOrder(['01/02/2026', '01/03/2026', '31/03/2026']), 'dmy'));
+
+console.log('\n── 日期在匯入流程中的把關 ──');
+function csvWith(dates) {
+  var head = '日期,型別,大類,子類,帳戶層,帳戶,幣別,原幣金額,匯率';
+  return [head].concat(dates.map(function (d) {
+    return d + ',支出,餐飲,午餐,現金,現鈔,MOP,100,1';
+  })).join('\r\n');
+}
+t('日月年整檔可解時全數匯入', () => {
+  const plan = C.planCSVImport(csvWith(['26/08/2026', '03/04/2026']), null);
+  eq(plan.dateOrder, 'dmy');
+  eq(plan.entries.length, 2);
+  eq(plan.entries[1].date, '2026-04-03');
+});
+t('月日年整檔可解時全數匯入', () => {
+  const plan = C.planCSVImport(csvWith(['08/26/2026', '03/04/2026']), null);
+  eq(plan.dateOrder, 'mdy');
+  eq(plan.entries[1].date, '2026-03-04');
+});
+t('歧義時整批擋下並說明原因', () => {
+  const plan = C.planCSVImport(csvWith(['03/04/2026', '05/06/2026']), null);
+  eq(plan.dateOrder, 'ambiguous');
+  eq(plan.entries.length, 0);
+  ok(plan.errors[0].msg.indexOf('分不出日月') >= 0);
+});
+t('矛盾時擋下並指出矛盾', () => {
+  const plan = C.planCSVImport(csvWith(['26/08/2026', '08/26/2026']), null);
+  eq(plan.dateOrder, 'conflict');
+  ok(plan.errors[0].msg.indexOf('矛盾') >= 0);
+});
+t('年在前與 Excel 序號可混用', () => {
+  const plan = C.planCSVImport(csvWith(['2026-08-01', '46265']), null);
+  eq(plan.entries.length, 2);
+  eq(plan.entries[1].date, '2026-08-31');
+});
+t('自家匯出檔照樣是年在前', () => {
+  const plan = C.planCSVImport(C.toCSV([E('2026-08-01', '餐飲', 100)], []), null);
+  eq(plan.dateOrder, 'none');
+  eq(plan.entries.length, 1);
+});
+
+
+console.log('\n── 月度趨勢 ──');
+function mkMonths(list) {   // [[ym, 支出, 收入], ...]
+  var out = [];
+  list.forEach(function (x, i) {
+    out.push(E(x[0] + '-05', '餐飲', x[1]));
+    out.push({ id: 'i' + i, type: 'income', date: x[0] + '-01', cat: '薪金', sub: '月薪',
+               pay: C.CASH, acct: '中銀澳門', currency: 'MOP', amount: x[2], rate: 1, tripId: null });
+  });
+  return out;
+}
+const trend = mkMonths([['2026-06', 3000, 60000], ['2026-07', 4000, 60000], ['2026-08', 5000, 62000]]);
+t('回傳指定月數', () => eq(C.monthlySeries(trend, '2026-08', 6, 'all').rows.length, 6));
+t('依時間由舊到新', () => {
+  const r = C.monthlySeries(trend, '2026-08', 6, 'all').rows;
+  eq(r[0].ym, '2026-03'); eq(r[5].ym, '2026-08');
+});
+t('沒有資料的月份標記出來', () => {
+  const r = C.monthlySeries(trend, '2026-08', 6, 'all').rows;
+  eq(r[0].has, false); eq(r[5].has, true);
+});
+t('標出當前月份', () => {
+  const r = C.monthlySeries(trend, '2026-08', 6, 'all').rows;
+  eq(r.filter(x => x.isCurrent).length, 1);
+  eq(r[5].isCurrent, true);
+});
+t('收入支出與淨額', () => {
+  const r = C.monthlySeries(trend, '2026-08', 6, 'all').rows[5];
+  eq(r.expense, 5000); eq(r.income, 62000); eq(r.net, 57000);
+});
+t('平均只算有資料的月份', () => {
+  const s = C.monthlySeries(trend, '2026-08', 6, 'all');
+  eq(s.monthsWithData, 3); eq(s.avgExpense, 4000);
+});
+t('全空時不除以零', () => {
+  const s = C.monthlySeries([], '2026-08', 6, 'all');
+  eq(s.avgExpense, 0); eq(s.max, 0); eq(s.monthsWithData, 0);
+});
+t('同期天數套用到每一個月', () => {
+  const late = trend.concat([E('2026-07-28', '餐飲', 9000)]);
+  eq(C.monthlySeries(late, '2026-08', 6, 'all', 10).rows[4].expense, 4000);
+  eq(C.monthlySeries(late, '2026-08', 6, 'all').rows[4].expense, 13000);
+});
+t('同期天數不超過該月天數', () => {
+  const feb = mkMonths([['2026-02', 500, 0]]);
+  eq(C.monthlySeries(feb, '2026-03', 2, 'all', 31).rows[0].expense, 500);
+});
+t('旅行檢視傳遞下去', () => {
+  const withTrip = trend.concat([E('2026-08-09', '餐飲', 7000, { tripId: 't1' })]);
+  eq(C.monthlySeries(withTrip, '2026-08', 6, 'exclude').rows[5].expense, 5000);
+  eq(C.monthlySeries(withTrip, '2026-08', 6, 'all').rows[5].expense, 12000);
+});
+t('轉帳不算進趨勢', () => {
+  const withT = trend.concat([T('2026-08-09', 9999)]);
+  eq(C.monthlySeries(withT, '2026-08', 6, 'all').rows[5].expense, 5000);
+});
+
+console.log('\n── 偏差 ──');
+const devBase = [];
+['2026-05', '2026-06', '2026-07'].forEach(function (m) {
+  devBase.push(E(m + '-05', '餐飲', 3000));
+  devBase.push(E(m + '-06', '交通', 1000));
+});
+t('樣本不足時不給值', () => {
+  const d = C.deviationRows([E('2026-08-05', '餐飲', 100)], '2026-08', 31, 'exclude');
+  eq(d.ready, false); eq(d.rows.length, 0);
+});
+function pick(d, cat) { return d.rows.filter(r => r.cat === cat)[0]; }
+t('滿三個月才給值', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-05', '餐飲', 4500)]), '2026-08', 31, 'exclude');
+  eq(d.ready, true);
+  ok(Math.abs(pick(d, '餐飲').deltaPct - 0.5) < 1e-9);
+});
+t('差額同時給金額', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-05', '餐飲', 4500)]), '2026-08', 31, 'exclude');
+  eq(pick(d, '餐飲').diff, 1500); eq(pick(d, '餐飲').avgSame, 3000);
+});
+t('本月完全沒花的類別是 −100%', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-05', '餐飲', 3000)]), '2026-08', 31, 'exclude');
+  eq(pick(d, '交通').deltaPct, -1);
+});
+t('依偏差絕對值排序', () => {
+  const d = C.deviationRows(devBase.concat([
+    E('2026-08-05', '餐飲', 3300), E('2026-08-06', '交通', 300)]), '2026-08', 31, 'exclude');
+  eq(d.rows[0].cat, '交通');   // −70% 比 +10% 大
+});
+t('低於基準是負數', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-05', '餐飲', 1500)]), '2026-08', 31, 'exclude');
+  ok(d.rows[0].deltaPct < 0);
+});
+t('地板以下標記為靜音但仍給值', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-06', '交通', 2000)]), '2026-08', 31, 'exclude');
+  const tr = d.rows.filter(r => r.cat === '交通')[0];
+  eq(tr.muted, true); eq(tr.flag, false); ok(tr.deltaPct > 0.3);
+});
+t('maxAbs 供畫圖縮放', () => {
+  const d = C.deviationRows(devBase.concat([E('2026-08-05', '餐飲', 6000)]), '2026-08', 31, 'exclude');
+  ok(Math.abs(d.maxAbs - 1) < 1e-9);
 });
 
 console.log('\n' + '─'.repeat(40));

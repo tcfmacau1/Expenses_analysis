@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""把 core.js 與 app.js 注入 index.html，產生零外部相依的單檔版本。改完任一個就跑一次。"""
-import pathlib, re, sys
+"""把 core.js 與 app.js 注入 index.html，並蓋上版本戳。
+版本戳同步寫進 index.html（window.__BUILD、資源 ?v=）與 sw.js（CACHE 名稱），
+確保每次組建的 service worker 快取都是新的，手機不會抱著舊版不放。"""
+import datetime, pathlib, re, sys
 
 root = pathlib.Path(__file__).parent
+BUILD = datetime.datetime.now().strftime('%Y%m%d-%H%M')
+
 html = (root / 'index.html').read_text()
 
 for name, begin, end in [
@@ -18,5 +22,18 @@ for name, begin, end in [
     html = pattern.sub(lambda m: begin + '\n' + src + '\n' + end, html)
     print(f'已注入 {name}（{len(src):,} 字元）')
 
+# 版本戳
+html, n1 = re.subn(r"window\.__BUILD='[^']*'", f"window.__BUILD='{BUILD}'", html)
+html, n2 = re.subn(r'(manifest\.webmanifest|icon-192\.png)\?v=[^"]*', rf'\1?v={BUILD}', html)
+if not n1:
+    sys.exit('index.html 找不到 window.__BUILD，無法蓋版本戳')
 (root / 'index.html').write_text(html)
+
+sw = (root / 'sw.js').read_text()
+sw, n3 = re.subn(r"const BUILD = '[^']*';", f"const BUILD = '{BUILD}';", sw)
+if not n3:
+    sys.exit('sw.js 找不到 BUILD 常數')
+(root / 'sw.js').write_text(sw)
+
+print(f'版本戳 {BUILD}（index.html {n1+n2} 處、sw.js {n3} 處）')
 print(f'index.html 共 {len(html):,} 字元，外部相依 0')

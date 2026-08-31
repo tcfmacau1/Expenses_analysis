@@ -266,6 +266,48 @@
     };
   }
 
+
+  // ── 月度趨勢 ──────────────────────────────────────────────────
+  // 看的是當月的 1–N 日對比往月的 1–N 日；拿殘缺的本月去比完整的往月是騙自己。
+  function monthlySeries(entries, ym, months, tripMode, throughDay) {
+    months = months || 6;
+    tripMode = tripMode || 'exclude';
+    var rows = [];
+    for (var i = months - 1; i >= 0; i--) {
+      var m = shiftYM(ym, -i);
+      var cap = throughDay ? Math.min(throughDay, daysInMonth(m)) : daysInMonth(m);
+      var exp = sumMOP(filterEntries(entries, { ym: m, type: 'expense', tripMode: tripMode, throughDay: cap }));
+      var inc = sumMOP(filterEntries(entries, { ym: m, type: 'income', tripMode: 'all', throughDay: cap }));
+      var any = filterEntries(entries, { ym: m, tripMode: 'all', throughDay: cap }).length > 0;
+      rows.push({ ym: m, expense: exp, income: inc, net: round2(inc - exp), has: any, isCurrent: m === ym });
+    }
+    var withData = rows.filter(function (r) { return r.has; });
+    var max = 0;
+    rows.forEach(function (r) { max = Math.max(max, r.expense, r.income); });
+    var avgExp = withData.length
+      ? round2(withData.reduce(function (s, r) { return s + r.expense; }, 0) / withData.length)
+      : 0;
+    return { rows: rows, max: max, avgExpense: avgExp, monthsWithData: withData.length, throughDay: throughDay || null };
+  }
+
+  // ── 偏差：本月同期 vs 近三月同期均值 ──────────────────────────
+  // 只在樣本滿三個月時給值；不足就回 null，畫面別畫。
+  function deviationRows(entries, ym, throughDay, tripMode) {
+    var rep = monthReport(entries, ym, throughDay, tripMode || 'exclude');
+    var rows = rep.rows.filter(function (r) {
+      return r.n >= BASELINE_MONTHS && r.deltaPct !== null;
+    }).map(function (r) {
+      return {
+        cat: r.cat, amount: r.amount, avgSame: r.avgSame,
+        diff: round2(r.amount - r.avgSame), deltaPct: r.deltaPct,
+        flag: r.flag, muted: r.reason === 'below-floor'
+      };
+    });
+    rows.sort(function (a, b) { return Math.abs(b.deltaPct) - Math.abs(a.deltaPct); });
+    var maxAbs = rows.reduce(function (m, r) { return Math.max(m, Math.abs(r.deltaPct)); }, 0);
+    return { rows: rows, maxAbs: maxAbs, ready: rows.length > 0 };
+  }
+
   // ── 行程 ──────────────────────────────────────────────────────
   function tripForDate(trips, date) {
     var hit = (trips || []).filter(function (t) { return date >= t.start && date <= t.end; });
@@ -361,14 +403,62 @@
     return Number(s);
   }
 
-  // 接受 2026-08-01、2026/8/1、2026.8.1；其餘一律當錯誤，不猜。
-  function normDate(v) {
-    var s = String(v || '').trim();
-    var m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
-    if (!m) return null;
-    var y = m[1], mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+  // 日期：年在前的一律接受；年在後（Excel 常見）要先看整個檔案定順序，不逐列猜。
+  function iso(y, mo, d) {
     if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-    return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    return String(y) + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+
+  // Excel 序號（1900 曆制）。25569 = 1970-01-01
+  function fromSerial(n) {
+    var dt = new Date(Date.UTC(1970, 0, 1) + (n - 25569) * 86400000);
+    if (isNaN(dt.getTime())) return null;
+    return iso(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+  }
+
+  // 拆成 {kind, a, b, c}；kind: 'ymd' | 'tail' | 'serial' | null
+  function splitDate(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!s) return null;
+    var cn = s.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$/);
+    if (cn) return { kind: 'ymd', a: +cn[1], b: +cn[2], c: +cn[3] };
+    var y1 = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+    if (y1) return { kind: 'ymd', a: +y1[1], b: +y1[2], c: +y1[3] };
+    var y2 = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+    if (y2) return { kind: 'tail', a: +y2[1], b: +y2[2], c: +y2[3] };
+    if (/^\d{5}$/.test(s)) {
+      var n = parseInt(s, 10);
+      if (n >= 20000 && n <= 80000) return { kind: 'serial', a: n };
+    }
+    return null;
+  }
+
+  // 掃描全檔決定年在後的順序。任何一列的首欄 > 12 就釘死日／月／年，反之亦然。
+  // 兩種證據都出現＝檔案本身矛盾；一種都沒有＝真的有歧義，兩者都不猜。
+  function detectDateOrder(values) {
+    var dmy = 0, mdy = 0, tail = 0;
+    (values || []).forEach(function (v) {
+      var p = splitDate(v);
+      if (!p || p.kind !== 'tail') return;
+      tail++;
+      if (p.a > 12) dmy++;
+      if (p.b > 12) mdy++;
+    });
+    if (!tail) return 'none';
+    if (dmy && mdy) return 'conflict';
+    if (dmy) return 'dmy';
+    if (mdy) return 'mdy';
+    return 'ambiguous';
+  }
+
+  function normDate(v, order) {
+    var p = splitDate(v);
+    if (!p) return null;
+    if (p.kind === 'ymd') return iso(p.a, p.b, p.c);
+    if (p.kind === 'serial') return fromSerial(p.a);
+    if (order === 'dmy') return iso(p.c, p.b, p.a);
+    if (order === 'mdy') return iso(p.c, p.a, p.b);
+    return null;   // 歧義或矛盾：交給呼叫端報錯
   }
 
   var KIND_MAP = { '支出': 'expense', '收入': 'income', '轉帳': 'transfer',
@@ -413,13 +503,28 @@
     ((state && state.trips) || []).forEach(function (t) { tripByName[t.name] = t.id; });
     var pendingTrips = {};
 
+    var rawDates = [];
+    for (var q = 1; q < rows.length; q++) rawDates.push(cell(rows[q], '日期'));
+    var dateOrder = detectDateOrder(rawDates);
+    out.dateOrder = dateOrder;
+
     for (var r = 1; r < rows.length; r++) {
       var line = r + 1;
       var row = rows[r];
       out.total++;
 
-      var date = normDate(cell(row, '日期'));
-      if (!date) { out.errors.push({ line: line, msg: '日期看不懂：' + cell(row, '日期') }); continue; }
+      var raw = cell(row, '日期');
+      var date = normDate(raw, dateOrder);
+      if (!date) {
+        var why = '日期看不懂：' + raw;
+        if (splitDate(raw) && splitDate(raw).kind === 'tail') {
+          why = dateOrder === 'conflict'
+            ? ('日期順序矛盾：' + raw + '（同一個檔裡既有日／月／年也有月／日／年）')
+            : ('日期分不出日月：' + raw + '（整個檔都在 12 以內，無法判斷順序）');
+        }
+        out.errors.push({ line: line, msg: why });
+        continue;
+      }
 
       var type = KIND_MAP[cell(row, '型別')];
       if (!type) { out.errors.push({ line: line, msg: '型別要是 支出／收入／轉帳' }); continue; }
@@ -647,8 +752,10 @@
     tripForDate: tripForDate, bumpFreq: bumpFreq, sortByFreq: sortByFreq, topOf: topOf,
     csvCell: csvCell, toCSV: toCSV, validateImport: validateImport, migrate: migrate,
     parseCSV: parseCSV, normNum: normNum, normDate: normDate,
+    normDate: normDate, splitDate: splitDate, detectDateOrder: detectDateOrder,
     planCSVImport: planCSVImport, applyCSVPlan: applyCSVPlan, dedupKey: dedupKey,
-    monthReport: monthReport, byAccount: byAccount, subBreakdown: subBreakdown
+    monthReport: monthReport, byAccount: byAccount, subBreakdown: subBreakdown,
+    monthlySeries: monthlySeries, deviationRows: deviationRows
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
