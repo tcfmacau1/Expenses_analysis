@@ -130,6 +130,29 @@ main{padding-top:12px}
   display:flex;justify-content:space-between;font-size:10.5px;color:var(--mute);
   padding-top:8px;padding-bottom:11px;
 }
+.band{cursor:pointer}
+.band .bn::before{content:"▸ ";font-size:10px;opacity:.7}
+.band.open .bn::before{content:"▾ "}
+.subpanel{background:var(--sky-soft);padding:9px 12px 10px;border-bottom:1px solid rgba(255,255,255,.5)}
+.subpanel .sh{
+  display:flex;justify-content:space-between;font-size:10px;letter-spacing:.08em;
+  color:var(--sky-deep);font-weight:800;padding-bottom:5px;
+}
+.subrow{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:5px 0;border-bottom:1px solid rgba(0,160,233,.14);font-size:12.5px;color:var(--ink);
+}
+.subrow:last-of-type{border-bottom:0}
+.subrow .sn{white-space:nowrap}
+.subrow .sn i{font-style:normal;color:var(--mute);font-size:10.5px;margin-left:5px}
+.subrow .sv{display:flex;align-items:baseline;font-family:var(--f-num);font-variant-numeric:tabular-nums}
+.subrow .sv .p{width:48px;text-align:right;font-size:10.5px;color:var(--mute)}
+.subrow .sv .a{width:76px;text-align:right;font-size:12.5px;font-weight:700}
+.subrow.rest{color:var(--mute)}
+.submore{
+  background:none;border:0;color:var(--sky-deep);font-size:11.5px;font-weight:700;
+  padding:6px 0 0;cursor:pointer;text-decoration:underline;
+}
 
 /* ── 表列 ───────────────────────────────── */
 .thead{
@@ -276,8 +299,8 @@ nav button[aria-pressed="true"]{color:var(--sky);font-weight:800}
 </main>
 
 <nav id="nav">
-  <button data-v="stats" aria-pressed="true"><span class="ic"><svg viewBox="0 0 20 20"><rect x="2.5" y="11" width="4" height="6"/><rect x="8" y="6" width="4" height="11"/><rect x="13.5" y="3" width="4" height="14"/></svg></span>統計</button>
-  <button data-v="add" aria-pressed="false"><span class="ic"><svg viewBox="0 0 20 20"><path d="M10 3.5v13M3.5 10h13"/></svg></span>記一筆</button>
+  <button data-v="add" aria-pressed="true"><span class="ic"><svg viewBox="0 0 20 20"><path d="M10 3.5v13M3.5 10h13"/></svg></span>記一筆</button>
+  <button data-v="stats" aria-pressed="false"><span class="ic"><svg viewBox="0 0 20 20"><rect x="2.5" y="11" width="4" height="6"/><rect x="8" y="6" width="4" height="11"/><rect x="13.5" y="3" width="4" height="14"/></svg></span>統計</button>
   <button data-v="log" aria-pressed="false"><span class="ic"><svg viewBox="0 0 20 20"><path d="M3 5.5h14M3 10h14M3 14.5h9"/></svg></span>紀錄</button>
   <button data-v="set" aria-pressed="false"><span class="ic"><svg viewBox="0 0 20 20"><path d="M3 6h6M13 6h4M3 14h4M11 14h6"/><circle cx="11" cy="6" r="2"/><circle cx="9" cy="14" r="2"/></svg></span>設定</button>
 </nav>
@@ -560,6 +583,36 @@ nav button[aria-pressed="true"]{color:var(--sky);font-weight:800}
       .filter(function (e) { return e.pay === CARD; }));
   }
 
+
+  // ── 子類明細（點大類展開）──────────────────────────────────────
+  // 預設只給佔比最前三項，其餘併成一行——超過三項就不再是「一眼看懂」。
+  function subBreakdown(entries, ym, cat, throughDay, tripMode, tripId, topN) {
+    topN = topN || 3;
+    var list = filterEntries(entries, {
+      ym: ym, type: 'expense', tripMode: tripMode || 'exclude', tripId: tripId, throughDay: throughDay
+    }).filter(function (e) { return e.cat === cat; });
+    var sums = {}, counts = {};
+    list.forEach(function (e) {
+      var k = e.sub || '未分類';
+      sums[k] = round2((sums[k] || 0) + toMOP(e));
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    var total = round2(list.reduce(function (s, e) { return s + toMOP(e); }, 0));
+    var all = Object.keys(sums).map(function (k) {
+      return { sub: k, amount: sums[k], count: counts[k], share: total > 0 ? sums[k] / total : 0 };
+    }).sort(function (a, b) { return b.amount - a.amount; });
+    var top = all.slice(0, topN);
+    var rest = all.slice(topN);
+    return {
+      cat: cat, total: total, count: list.length, all: all, top: top,
+      rest: {
+        items: rest.length,
+        amount: round2(rest.reduce(function (s, r) { return s + r.amount; }, 0)),
+        share: total > 0 ? rest.reduce(function (s, r) { return s + r.amount; }, 0) / total : 0
+      }
+    };
+  }
+
   // ── 行程 ──────────────────────────────────────────────────────
   function tripForDate(trips, date) {
     var hit = (trips || []).filter(function (t) { return date >= t.start && date <= t.end; });
@@ -617,6 +670,229 @@ nav button[aria-pressed="true"]{color:var(--sky);font-weight:800}
       });
     return '\ufeff' + [head.map(csvCell).join(',')].concat(rows).join('\r\n');
   }
+
+
+  // ── CSV 匯入 ──────────────────────────────────────────────────
+  // 進來的檔案不受控制：Excel 會改日期格式、加千分位、動欄位順序。
+  // 因此一律以「欄位名稱」對應，而非欄位位置；金額一律由原幣×匯率重算，
+  // 絕不採用匯出檔裡的「澳門幣金額」（那是顯示值，不是儲存值）。
+  function parseCSV(text) {
+    if (!text) return [];
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    var rows = [], row = [], cur = '', i = 0, inQ = false;
+    while (i < text.length) {
+      var c = text[i];
+      if (inQ) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { cur += '"'; i += 2; continue; }
+          inQ = false; i++; continue;
+        }
+        cur += c; i++; continue;
+      }
+      if (c === '"') { inQ = true; i++; continue; }
+      if (c === ',') { row.push(cur); cur = ''; i++; continue; }
+      if (c === '\r') { i++; continue; }
+      if (c === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
+      cur += c; i++;
+    }
+    if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+    return rows.filter(function (r) {
+      return r.some(function (x) { return String(x).trim() !== ''; });
+    });
+  }
+
+  function normNum(v) {
+    if (v === null || v === undefined) return NaN;
+    var s = String(v).replace(/[,\s\u00A0]/g, '').replace(/^MOP/i, '');
+    if (s === '') return NaN;
+    return Number(s);
+  }
+
+  // 接受 2026-08-01、2026/8/1、2026.8.1；其餘一律當錯誤，不猜。
+  function normDate(v) {
+    var s = String(v || '').trim();
+    var m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+    if (!m) return null;
+    var y = m[1], mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+
+  var KIND_MAP = { '支出': 'expense', '收入': 'income', '轉帳': 'transfer',
+                   'expense': 'expense', 'income': 'income', 'transfer': 'transfer' };
+
+  function dedupKey(e) {
+    return [e.type, e.date, e.amount, e.currency, e.cat || '', e.sub || '',
+            e.pay || '', e.acct || '', e.fromPay || '', e.fromAcct || '',
+            e.toPay || '', e.toAcct || ''].join('|');
+  }
+
+  // 回傳一份「計畫」而不直接改狀態，讓使用者先看報告再決定。
+  function planCSVImport(text, state) {
+    var out = { entries: [], errors: [], dupes: 0,
+                newSubs: {}, newAccounts: {}, newTrips: [], total: 0 };
+    var rows = parseCSV(text);
+    if (!rows.length) { out.errors.push({ line: 0, msg: '檔案是空的' }); return out; }
+
+    var head = rows[0].map(function (h) { return String(h).trim(); });
+    var idx = {};
+    head.forEach(function (h, i) { idx[h] = i; });
+    ['日期', '型別', '原幣金額'].forEach(function (need) {
+      if (!(need in idx)) out.errors.push({ line: 1, msg: '缺少必要欄位「' + need + '」' });
+    });
+    if (out.errors.length) return out;
+
+    function cell(r, name) {
+      var i = idx[name];
+      return (i === undefined || r[i] === undefined) ? '' : String(r[i]).trim();
+    }
+
+    var catNames = CATS.map(function (c) { return c.name; });
+    var incNames = INCOME_CATS.map(function (c) { return c.name; });
+    var existing = {};
+    ((state && state.entries) || []).forEach(function (e) { existing[dedupKey(e)] = 1; });
+    var knownAcct = {};
+    LAYERS.forEach(function (L) {
+      knownAcct[L] = {};
+      accountsOf(state, L).forEach(function (a) { knownAcct[L][a] = 1; });
+    });
+    var tripByName = {};
+    ((state && state.trips) || []).forEach(function (t) { tripByName[t.name] = t.id; });
+    var pendingTrips = {};
+
+    for (var r = 1; r < rows.length; r++) {
+      var line = r + 1;
+      var row = rows[r];
+      out.total++;
+
+      var date = normDate(cell(row, '日期'));
+      if (!date) { out.errors.push({ line: line, msg: '日期看不懂：' + cell(row, '日期') }); continue; }
+
+      var type = KIND_MAP[cell(row, '型別')];
+      if (!type) { out.errors.push({ line: line, msg: '型別要是 支出／收入／轉帳' }); continue; }
+
+      var amount = normNum(cell(row, '原幣金額'));
+      if (!(amount > 0)) { out.errors.push({ line: line, msg: '金額無效：' + cell(row, '原幣金額') }); continue; }
+      amount = round2(amount);
+
+      var currency = cell(row, '幣別') || 'MOP';
+      if (CURRENCIES.indexOf(currency) < 0) {
+        out.errors.push({ line: line, msg: '不支援的幣別：' + currency }); continue;
+      }
+      var rate = 1;
+      if (currency !== 'MOP') {
+        rate = normNum(cell(row, '匯率'));
+        if (!(rate > 0)) {
+          // 沒有匯率就用澳門幣金額回推，仍然不直接採用它當金額
+          var mop = normNum(cell(row, '澳門幣金額'));
+          rate = (mop > 0) ? round2(mop / amount) : NaN;
+        }
+        if (!(rate > 0)) { out.errors.push({ line: line, msg: '外幣缺少匯率' }); continue; }
+      }
+
+      var e = {
+        id: 'csv' + line + '_' + Math.random().toString(36).slice(2, 7),
+        type: type, date: date, amount: amount, currency: currency, rate: rate,
+        merchant: cell(row, '店家'), note: cell(row, '備註'),
+        createdAt: new Date().toISOString()
+      };
+
+      var layer = cell(row, '帳戶層') || CASH;
+      if (LAYERS.indexOf(layer) < 0) { out.errors.push({ line: line, msg: '帳戶層要是 現金 或 信用卡' }); continue; }
+      var acct = cell(row, '帳戶') || UNASSIGNED;
+
+      if (type === 'transfer') {
+        var fromLayer = cell(row, '轉出層') || CASH;
+        if (LAYERS.indexOf(fromLayer) < 0) { out.errors.push({ line: line, msg: '轉出層要是 現金 或 信用卡' }); continue; }
+        var fromAcct = cell(row, '轉出帳戶') || UNASSIGNED;
+        if (fromLayer === layer && fromAcct === acct) {
+          out.errors.push({ line: line, msg: '轉出與轉入是同一個帳戶' }); continue;
+        }
+        e.fromPay = fromLayer; e.fromAcct = fromAcct;
+        e.toPay = layer; e.toAcct = acct;
+        e.tripId = null;
+        [[fromLayer, fromAcct], [layer, acct]].forEach(function (pair) {
+          noteAccount(out, knownAcct, pair[0], pair[1]);
+        });
+      } else {
+        var cat = cell(row, '大類');
+        var pool = (type === 'income') ? incNames : catNames;
+        if (pool.indexOf(cat) < 0) {
+          out.errors.push({ line: line, msg: '不認得的' + (type === 'income' ? '收入類別' : '大類') + '：' + (cat || '(空白)') });
+          continue;
+        }
+        var sub = cell(row, '子類') || '未分類';
+        e.cat = cat; e.sub = sub; e.pay = layer; e.acct = acct;
+        var known = (type === 'income' ? INCOME_CATS : CATS)
+          .filter(function (c) { return c.name === cat; })[0].subs;
+        var extra = ((state && state.subs && state.subs[cat]) || []);
+        if (known.indexOf(sub) < 0 && extra.indexOf(sub) < 0) {
+          out.newSubs[cat] = out.newSubs[cat] || [];
+          if (out.newSubs[cat].indexOf(sub) < 0) out.newSubs[cat].push(sub);
+        }
+        noteAccount(out, knownAcct, layer, acct);
+
+        var tname = cell(row, '行程');
+        if (tname) {
+          if (tripByName[tname]) {
+            e.tripId = tripByName[tname];
+          } else {
+            if (!pendingTrips[tname]) pendingTrips[tname] = { name: tname, start: date, end: date };
+            if (date < pendingTrips[tname].start) pendingTrips[tname].start = date;
+            if (date > pendingTrips[tname].end) pendingTrips[tname].end = date;
+            e.__tripName = tname;
+          }
+        } else {
+          e.tripId = null;
+        }
+      }
+
+      var k = dedupKey(e);
+      if (existing[k]) { out.dupes++; continue; }
+      existing[k] = 1;
+      out.entries.push(e);
+    }
+
+    Object.keys(pendingTrips).forEach(function (n) { out.newTrips.push(pendingTrips[n]); });
+    return out;
+  }
+
+  function noteAccount(out, knownAcct, layer, acct) {
+    if (acct === UNASSIGNED) return;
+    if (knownAcct[layer] && knownAcct[layer][acct]) return;
+    out.newAccounts[layer] = out.newAccounts[layer] || [];
+    if (out.newAccounts[layer].indexOf(acct) < 0) out.newAccounts[layer].push(acct);
+    if (knownAcct[layer]) knownAcct[layer][acct] = 1;
+  }
+
+  // 把計畫套用到狀態上（附加，不取代）
+  function applyCSVPlan(state, plan) {
+    plan.newTrips.forEach(function (t) {
+      var id = 'tcsv' + Math.random().toString(36).slice(2, 8);
+      state.trips.push({ id: id, name: t.name, start: t.start, end: t.end });
+      plan.entries.forEach(function (e) {
+        if (e.__tripName === t.name) { e.tripId = id; }
+      });
+    });
+    Object.keys(plan.newSubs).forEach(function (cat) {
+      state.subs[cat] = state.subs[cat] || [];
+      plan.newSubs[cat].forEach(function (s) {
+        if (state.subs[cat].indexOf(s) < 0) state.subs[cat].push(s);
+      });
+    });
+    Object.keys(plan.newAccounts).forEach(function (L) {
+      var cur = accountsOf(state, L);
+      plan.newAccounts[L].forEach(function (a) { if (cur.indexOf(a) < 0) cur.push(a); });
+      state.accounts[L] = cur;
+    });
+    plan.entries.forEach(function (e) {
+      delete e.__tripName;
+      if (e.tripId === undefined) e.tripId = null;
+      state.entries.push(e);
+    });
+    return state;
+  }
+
 
   // ── 匯入驗證 ──────────────────────────────────────────────────
   function validateImport(obj) {
@@ -717,7 +993,9 @@ nav button[aria-pressed="true"]{color:var(--sky);font-weight:800}
     cardOutstanding: cardOutstanding, cardCharged: cardCharged,
     tripForDate: tripForDate, bumpFreq: bumpFreq, sortByFreq: sortByFreq, topOf: topOf,
     csvCell: csvCell, toCSV: toCSV, validateImport: validateImport, migrate: migrate,
-    monthReport: monthReport, byAccount: byAccount
+    parseCSV: parseCSV, normNum: normNum, normDate: normDate,
+    planCSVImport: planCSVImport, applyCSVPlan: applyCSVPlan, dedupKey: dedupKey,
+    monthReport: monthReport, byAccount: byAccount, subBreakdown: subBreakdown
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -767,7 +1045,8 @@ function save(){
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
-var view='stats', ym=C.ymOf(C.todayISO()), tripMode='exclude', onlyTripId=null;
+var view='add', ym=C.ymOf(C.todayISO()), tripMode='exclude', onlyTripId=null;
+var openCat=null, openAll=false;   // 地層展開的大類與是否顯示全部子類
 
 /* ── 小工具 ───────────────────────────────────────────── */
 function el(t,c,txt){ var e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e; }
@@ -785,6 +1064,47 @@ function hint(t){ var d=el('div','tiny muted'); d.style.marginBottom='8px'; d.te
 function callout(kind, text){
   var d = el('div','callout'+(kind==='info'?' info':'')); d.textContent = text; return d;
 }
+function subPanel(cat){
+  var b = C.subBreakdown(S.entries, ym, cat, throughDay(), tripMode, onlyTripId, 3);
+  var wrap = el('div','subpanel');
+  var sh = el('div','sh');
+  sh.appendChild(el('span','', cat+' 子類明細　共 '+b.count+' 筆'));
+  sh.appendChild(el('span','', money(b.total)));
+  wrap.appendChild(sh);
+
+  if(!b.all.length){
+    wrap.appendChild(el('div','tiny muted','這個月這一類沒有紀錄。'));
+    return wrap;
+  }
+  var list = openAll ? b.all : b.top;
+  list.forEach(function(r){
+    var row = el('div','subrow');
+    var nm = el('span','sn', r.sub);
+    nm.appendChild(el('i','', r.count+' 筆'));
+    row.appendChild(nm);
+    var v = el('span','sv');
+    v.appendChild(el('span','p', pct(r.share)));
+    v.appendChild(el('span','a', money(r.amount)));
+    row.appendChild(v);
+    wrap.appendChild(row);
+  });
+  if(!openAll && b.rest.items>0){
+    var rr = el('div','subrow rest');
+    rr.appendChild(el('span','sn', '其餘 '+b.rest.items+' 項'));
+    var v2 = el('span','sv');
+    v2.appendChild(el('span','p', pct(b.rest.share)));
+    v2.appendChild(el('span','a', money(b.rest.amount)));
+    rr.appendChild(v2);
+    wrap.appendChild(rr);
+  }
+  if(b.all.length>3){
+    var more = el('button','submore', openAll ? '只看前三項' : ('展開全部 '+b.all.length+' 項'));
+    more.onclick=function(ev){ ev.stopPropagation(); openAll=!openAll; renderStats(); };
+    wrap.appendChild(more);
+  }
+  return wrap;
+}
+
 function cell(k,v,cls){
   var c = el('div','cell');
   c.appendChild(el('div','k',k));
@@ -923,6 +1243,13 @@ function renderStats(){
       if(i>=4) band.className='band pale';
       band.style.height = (30 + Math.round((r.share/maxShare)*44))+'px';
       if(r.flag) band.className += ' flag';
+      if(openCat===r.cat) band.className += ' open';
+      band.dataset.cat = r.cat;
+      band.onclick = function(){
+        if(openCat===r.cat){ openCat=null; }
+        else { openCat=r.cat; openAll=false; }
+        renderStats();
+      };
       band.appendChild(el('span','bn', r.cat));
       var right = el('span','br');
       right.appendChild(el('span','dlt',
@@ -934,6 +1261,7 @@ function renderStats(){
       band.title = r.cat+'：本月 '+money(r.amount)+
         (r.n? '　近三月同期均值 '+money(r.avgSame)+'（n='+r.n+'）' : '　尚無對照');
       strata.appendChild(band);
+      if(openCat===r.cat) strata.appendChild(subPanel(r.cat));
     });
     sc.appendChild(strata);
     var lg = el('div','legend');
@@ -1423,11 +1751,17 @@ function renderSet(){
   dc.appendChild(st);
   var b1=el('button','btn sm','匯出 JSON 備份'); b1.onclick=exportJSON; dc.appendChild(b1);
   var b2=el('button','btn ghost sm','匯出 CSV（Excel）'); b2.onclick=exportCSV; dc.appendChild(b2);
-  var b3=el('button','btn ghost sm','匯入 JSON 還原');
+  var b3=el('button','btn ghost sm','匯入 JSON 還原（取代全部）');
   b3.onclick=function(){ document.getElementById('importFile').click(); };
   dc.appendChild(b3);
   var fi=el('input'); fi.type='file'; fi.id='importFile'; fi.accept='.json,application/json';
   fi.className='hidden'; fi.onchange=importJSON; dc.appendChild(fi);
+  var b4=el('button','btn ghost sm','匯入 CSV（附加紀錄）'); b4.id='btnImportCSV';
+  b4.onclick=function(){ document.getElementById('importCSVFile').click(); };
+  dc.appendChild(b4);
+  var fc=el('input'); fc.type='file'; fc.id='importCSVFile'; fc.accept='.csv,text/csv';
+  fc.className='hidden'; fc.onchange=importCSV; dc.appendChild(fc);
+  dc.appendChild(hint('CSV 是附加，不會蓋掉現有紀錄；完全一樣的行會自動略過。JSON 才是取代全部的還原。'));
   host.appendChild(dc);
 
   /* 帳戶 */
@@ -1536,7 +1870,8 @@ function renderSet(){
     ['什麼時候會提示','某大類超出近三月同期均值 30%，且該類近三月全月均值達 '+C.ANOMALY_FLOOR+' MOP。小額類別永久靜音，這是你選的。'],
     ['為什麼寫「已記錄」','沒有跟帳單對帳，所有數字只代表你記到的，不代表你花掉的。'],
     ['信用卡怎麼算','刷卡當下記消費（那是構成），還卡記成轉帳（那是現金流）。還卡不是消費，記成支出就雙重計算。'],
-    ['為什麼沒有帳戶餘額','沒有設期初餘額，所以只看得到「起用以來的變動」，看不到真實餘額。這是你選的取捨。']
+    ['為什麼沒有帳戶餘額','沒有設期初餘額，所以只看得到「起用以來的變動」，看不到真實餘額。這是你選的取捨。'],
+    ['CSV 匯入的規矩','以欄位名稱對應，欄位順序可以亂。金額一律用原幣×匯率重算，不採用「澳門幣金額」那一欄。大類認不得就報錯，不會偷偷丟進「其他」。']
   ].forEach(function(p){
     var d=el('div',''); d.style.marginBottom='10px';
     var t=el('div',''); t.style.fontWeight='700'; t.style.fontSize='13px'; t.style.color='var(--amber)';
@@ -1644,6 +1979,80 @@ function exportCSV(){
   download('expenses_'+stamp()+'.csv', C.toCSV(S.entries, S.trips), 'text/csv;charset=utf-8');
   toast('已匯出 CSV');
 }
+function importCSV(ev){
+  var f=ev.target.files && ev.target.files[0];
+  ev.target.value='';
+  if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){
+    var plan;
+    try{ plan = C.planCSVImport(String(r.result), S); }
+    catch(err){ toast('CSV 解析失敗'); return; }
+    openCSVReport(plan);
+  };
+  r.readAsText(f, 'utf-8');
+}
+
+function openCSVReport(plan){
+  var m=el('div','modal'); var sh=el('div','sheet');
+  sh.appendChild(el('h3','','CSV 匯入預覽'));
+
+  var g=el('div','bal');
+  g.appendChild(cell('可匯入', String(plan.entries.length)+' 筆', plan.entries.length?'pos':''));
+  g.appendChild(cell('重複略過', String(plan.dupes)+' 筆', ''));
+  g.appendChild(cell('有問題', String(plan.errors.length)+' 筆', plan.errors.length?'neg':''));
+  g.appendChild(cell('檔案總計', String(plan.total)+' 筆', ''));
+  sh.appendChild(g);
+
+  if(plan.errors.length){
+    var ec=el('div',''); ec.style.marginTop='12px';
+    ec.appendChild(el('div','tiny muted','有問題的行會被跳過，其餘照常匯入：'));
+    plan.errors.slice(0,8).forEach(function(x){
+      var r2=el('div','row'); r2.style.cursor='default';
+      var l=el('span','l');
+      l.appendChild(el('span','t','第 '+x.line+' 行'));
+      l.appendChild(el('span','sub', x.msg));
+      r2.appendChild(l);
+      ec.appendChild(r2);
+    });
+    if(plan.errors.length>8){
+      ec.appendChild(el('div','tiny muted','⋯還有 '+(plan.errors.length-8)+' 行有問題'));
+    }
+    sh.appendChild(ec);
+  }
+
+  var news=[];
+  Object.keys(plan.newAccounts).forEach(function(L){
+    news.push('新增'+L+'帳戶：'+plan.newAccounts[L].join('、'));
+  });
+  Object.keys(plan.newSubs).forEach(function(c){
+    news.push('新增「'+c+'」子類：'+plan.newSubs[c].join('、'));
+  });
+  if(plan.newTrips.length){
+    news.push('新建行程：'+plan.newTrips.map(function(t){
+      return t.name+'（'+t.start+' → '+t.end+'）'; }).join('、'));
+  }
+  if(news.length){
+    var nc=el('div','callout info'); nc.style.margin='12px 0 0';
+    nc.textContent = news.join('；')+'。大類不會被新增——認不得的大類一律當錯誤。';
+    sh.appendChild(nc);
+  }
+
+  var ok=el('button','btn','匯入這 '+plan.entries.length+' 筆');
+  ok.id='csvConfirm';
+  ok.disabled = plan.entries.length===0;
+  ok.onclick=function(){
+    C.applyCSVPlan(S, plan);
+    S.sinceExport = (S.sinceExport||0) + plan.entries.length;
+    save(); m.remove(); renderAll();
+    toast('已匯入 '+plan.entries.length+' 筆');
+  };
+  sh.appendChild(ok);
+  var c=el('button','btn ghost','取消'); c.onclick=function(){ m.remove(); }; sh.appendChild(c);
+  m.appendChild(sh); m.onclick=function(e){ if(e.target===m) m.remove(); };
+  document.body.appendChild(m);
+}
+
 function importJSON(ev){
   var f=ev.target.files && ev.target.files[0];
   if(!f) return;
@@ -1694,14 +2103,14 @@ function renderAll(){
   else renderSet();
 }
 
-document.getElementById('moPrev').onclick=function(){ ym=C.shiftYM(ym,-1); renderAll(); };
-document.getElementById('moNext').onclick=function(){ ym=C.shiftYM(ym,1); renderAll(); };
+document.getElementById('moPrev').onclick=function(){ ym=C.shiftYM(ym,-1); openCat=null; renderAll(); };
+document.getElementById('moNext').onclick=function(){ ym=C.shiftYM(ym,1); openCat=null; renderAll(); };
 Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function(b){
   b.onclick=function(){ if(b.dataset.v==='add' && view!=='add') draft=null; go(b.dataset.v); };
 });
 Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), function(b){
   b.onclick=function(){
-    tripMode=b.dataset.mode; onlyTripId=null;
+    tripMode=b.dataset.mode; onlyTripId=null; openCat=null;
     Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), function(x){
       x.setAttribute('aria-pressed', x===b?'true':'false');
     });
@@ -1710,7 +2119,7 @@ Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), funct
 });
 
 load();
-go('stats');
+go('add');
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){

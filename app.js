@@ -37,7 +37,8 @@ function save(){
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
-var view='stats', ym=C.ymOf(C.todayISO()), tripMode='exclude', onlyTripId=null;
+var view='add', ym=C.ymOf(C.todayISO()), tripMode='exclude', onlyTripId=null;
+var openCat=null, openAll=false;   // 地層展開的大類與是否顯示全部子類
 
 /* ── 小工具 ───────────────────────────────────────────── */
 function el(t,c,txt){ var e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e; }
@@ -55,6 +56,47 @@ function hint(t){ var d=el('div','tiny muted'); d.style.marginBottom='8px'; d.te
 function callout(kind, text){
   var d = el('div','callout'+(kind==='info'?' info':'')); d.textContent = text; return d;
 }
+function subPanel(cat){
+  var b = C.subBreakdown(S.entries, ym, cat, throughDay(), tripMode, onlyTripId, 3);
+  var wrap = el('div','subpanel');
+  var sh = el('div','sh');
+  sh.appendChild(el('span','', cat+' 子類明細　共 '+b.count+' 筆'));
+  sh.appendChild(el('span','', money(b.total)));
+  wrap.appendChild(sh);
+
+  if(!b.all.length){
+    wrap.appendChild(el('div','tiny muted','這個月這一類沒有紀錄。'));
+    return wrap;
+  }
+  var list = openAll ? b.all : b.top;
+  list.forEach(function(r){
+    var row = el('div','subrow');
+    var nm = el('span','sn', r.sub);
+    nm.appendChild(el('i','', r.count+' 筆'));
+    row.appendChild(nm);
+    var v = el('span','sv');
+    v.appendChild(el('span','p', pct(r.share)));
+    v.appendChild(el('span','a', money(r.amount)));
+    row.appendChild(v);
+    wrap.appendChild(row);
+  });
+  if(!openAll && b.rest.items>0){
+    var rr = el('div','subrow rest');
+    rr.appendChild(el('span','sn', '其餘 '+b.rest.items+' 項'));
+    var v2 = el('span','sv');
+    v2.appendChild(el('span','p', pct(b.rest.share)));
+    v2.appendChild(el('span','a', money(b.rest.amount)));
+    rr.appendChild(v2);
+    wrap.appendChild(rr);
+  }
+  if(b.all.length>3){
+    var more = el('button','submore', openAll ? '只看前三項' : ('展開全部 '+b.all.length+' 項'));
+    more.onclick=function(ev){ ev.stopPropagation(); openAll=!openAll; renderStats(); };
+    wrap.appendChild(more);
+  }
+  return wrap;
+}
+
 function cell(k,v,cls){
   var c = el('div','cell');
   c.appendChild(el('div','k',k));
@@ -193,6 +235,13 @@ function renderStats(){
       if(i>=4) band.className='band pale';
       band.style.height = (30 + Math.round((r.share/maxShare)*44))+'px';
       if(r.flag) band.className += ' flag';
+      if(openCat===r.cat) band.className += ' open';
+      band.dataset.cat = r.cat;
+      band.onclick = function(){
+        if(openCat===r.cat){ openCat=null; }
+        else { openCat=r.cat; openAll=false; }
+        renderStats();
+      };
       band.appendChild(el('span','bn', r.cat));
       var right = el('span','br');
       right.appendChild(el('span','dlt',
@@ -204,6 +253,7 @@ function renderStats(){
       band.title = r.cat+'：本月 '+money(r.amount)+
         (r.n? '　近三月同期均值 '+money(r.avgSame)+'（n='+r.n+'）' : '　尚無對照');
       strata.appendChild(band);
+      if(openCat===r.cat) strata.appendChild(subPanel(r.cat));
     });
     sc.appendChild(strata);
     var lg = el('div','legend');
@@ -693,11 +743,17 @@ function renderSet(){
   dc.appendChild(st);
   var b1=el('button','btn sm','匯出 JSON 備份'); b1.onclick=exportJSON; dc.appendChild(b1);
   var b2=el('button','btn ghost sm','匯出 CSV（Excel）'); b2.onclick=exportCSV; dc.appendChild(b2);
-  var b3=el('button','btn ghost sm','匯入 JSON 還原');
+  var b3=el('button','btn ghost sm','匯入 JSON 還原（取代全部）');
   b3.onclick=function(){ document.getElementById('importFile').click(); };
   dc.appendChild(b3);
   var fi=el('input'); fi.type='file'; fi.id='importFile'; fi.accept='.json,application/json';
   fi.className='hidden'; fi.onchange=importJSON; dc.appendChild(fi);
+  var b4=el('button','btn ghost sm','匯入 CSV（附加紀錄）'); b4.id='btnImportCSV';
+  b4.onclick=function(){ document.getElementById('importCSVFile').click(); };
+  dc.appendChild(b4);
+  var fc=el('input'); fc.type='file'; fc.id='importCSVFile'; fc.accept='.csv,text/csv';
+  fc.className='hidden'; fc.onchange=importCSV; dc.appendChild(fc);
+  dc.appendChild(hint('CSV 是附加，不會蓋掉現有紀錄；完全一樣的行會自動略過。JSON 才是取代全部的還原。'));
   host.appendChild(dc);
 
   /* 帳戶 */
@@ -806,7 +862,8 @@ function renderSet(){
     ['什麼時候會提示','某大類超出近三月同期均值 30%，且該類近三月全月均值達 '+C.ANOMALY_FLOOR+' MOP。小額類別永久靜音，這是你選的。'],
     ['為什麼寫「已記錄」','沒有跟帳單對帳，所有數字只代表你記到的，不代表你花掉的。'],
     ['信用卡怎麼算','刷卡當下記消費（那是構成），還卡記成轉帳（那是現金流）。還卡不是消費，記成支出就雙重計算。'],
-    ['為什麼沒有帳戶餘額','沒有設期初餘額，所以只看得到「起用以來的變動」，看不到真實餘額。這是你選的取捨。']
+    ['為什麼沒有帳戶餘額','沒有設期初餘額，所以只看得到「起用以來的變動」，看不到真實餘額。這是你選的取捨。'],
+    ['CSV 匯入的規矩','以欄位名稱對應，欄位順序可以亂。金額一律用原幣×匯率重算，不採用「澳門幣金額」那一欄。大類認不得就報錯，不會偷偷丟進「其他」。']
   ].forEach(function(p){
     var d=el('div',''); d.style.marginBottom='10px';
     var t=el('div',''); t.style.fontWeight='700'; t.style.fontSize='13px'; t.style.color='var(--amber)';
@@ -914,6 +971,80 @@ function exportCSV(){
   download('expenses_'+stamp()+'.csv', C.toCSV(S.entries, S.trips), 'text/csv;charset=utf-8');
   toast('已匯出 CSV');
 }
+function importCSV(ev){
+  var f=ev.target.files && ev.target.files[0];
+  ev.target.value='';
+  if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){
+    var plan;
+    try{ plan = C.planCSVImport(String(r.result), S); }
+    catch(err){ toast('CSV 解析失敗'); return; }
+    openCSVReport(plan);
+  };
+  r.readAsText(f, 'utf-8');
+}
+
+function openCSVReport(plan){
+  var m=el('div','modal'); var sh=el('div','sheet');
+  sh.appendChild(el('h3','','CSV 匯入預覽'));
+
+  var g=el('div','bal');
+  g.appendChild(cell('可匯入', String(plan.entries.length)+' 筆', plan.entries.length?'pos':''));
+  g.appendChild(cell('重複略過', String(plan.dupes)+' 筆', ''));
+  g.appendChild(cell('有問題', String(plan.errors.length)+' 筆', plan.errors.length?'neg':''));
+  g.appendChild(cell('檔案總計', String(plan.total)+' 筆', ''));
+  sh.appendChild(g);
+
+  if(plan.errors.length){
+    var ec=el('div',''); ec.style.marginTop='12px';
+    ec.appendChild(el('div','tiny muted','有問題的行會被跳過，其餘照常匯入：'));
+    plan.errors.slice(0,8).forEach(function(x){
+      var r2=el('div','row'); r2.style.cursor='default';
+      var l=el('span','l');
+      l.appendChild(el('span','t','第 '+x.line+' 行'));
+      l.appendChild(el('span','sub', x.msg));
+      r2.appendChild(l);
+      ec.appendChild(r2);
+    });
+    if(plan.errors.length>8){
+      ec.appendChild(el('div','tiny muted','⋯還有 '+(plan.errors.length-8)+' 行有問題'));
+    }
+    sh.appendChild(ec);
+  }
+
+  var news=[];
+  Object.keys(plan.newAccounts).forEach(function(L){
+    news.push('新增'+L+'帳戶：'+plan.newAccounts[L].join('、'));
+  });
+  Object.keys(plan.newSubs).forEach(function(c){
+    news.push('新增「'+c+'」子類：'+plan.newSubs[c].join('、'));
+  });
+  if(plan.newTrips.length){
+    news.push('新建行程：'+plan.newTrips.map(function(t){
+      return t.name+'（'+t.start+' → '+t.end+'）'; }).join('、'));
+  }
+  if(news.length){
+    var nc=el('div','callout info'); nc.style.margin='12px 0 0';
+    nc.textContent = news.join('；')+'。大類不會被新增——認不得的大類一律當錯誤。';
+    sh.appendChild(nc);
+  }
+
+  var ok=el('button','btn','匯入這 '+plan.entries.length+' 筆');
+  ok.id='csvConfirm';
+  ok.disabled = plan.entries.length===0;
+  ok.onclick=function(){
+    C.applyCSVPlan(S, plan);
+    S.sinceExport = (S.sinceExport||0) + plan.entries.length;
+    save(); m.remove(); renderAll();
+    toast('已匯入 '+plan.entries.length+' 筆');
+  };
+  sh.appendChild(ok);
+  var c=el('button','btn ghost','取消'); c.onclick=function(){ m.remove(); }; sh.appendChild(c);
+  m.appendChild(sh); m.onclick=function(e){ if(e.target===m) m.remove(); };
+  document.body.appendChild(m);
+}
+
 function importJSON(ev){
   var f=ev.target.files && ev.target.files[0];
   if(!f) return;
@@ -964,14 +1095,14 @@ function renderAll(){
   else renderSet();
 }
 
-document.getElementById('moPrev').onclick=function(){ ym=C.shiftYM(ym,-1); renderAll(); };
-document.getElementById('moNext').onclick=function(){ ym=C.shiftYM(ym,1); renderAll(); };
+document.getElementById('moPrev').onclick=function(){ ym=C.shiftYM(ym,-1); openCat=null; renderAll(); };
+document.getElementById('moNext').onclick=function(){ ym=C.shiftYM(ym,1); openCat=null; renderAll(); };
 Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function(b){
   b.onclick=function(){ if(b.dataset.v==='add' && view!=='add') draft=null; go(b.dataset.v); };
 });
 Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), function(b){
   b.onclick=function(){
-    tripMode=b.dataset.mode; onlyTripId=null;
+    tripMode=b.dataset.mode; onlyTripId=null; openCat=null;
     Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), function(x){
       x.setAttribute('aria-pressed', x===b?'true':'false');
     });
@@ -980,7 +1111,7 @@ Array.prototype.forEach.call(document.querySelectorAll('#tripSeg button'), funct
 });
 
 load();
-go('stats');
+go('add');
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){

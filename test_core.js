@@ -320,6 +320,242 @@ t('依帳戶加總本月支出', () => {
   eq(rows[0].amount, 900);
 });
 
+
+console.log('\n── CSV 解析 ──');
+t('去除 BOM 並切欄', () => {
+  const rows = C.parseCSV('\ufeffa,b,c\r\n1,2,3');
+  eq(rows.length, 2); eq(rows[1], ['1', '2', '3']);
+});
+t('引號內的逗號不切', () => eq(C.parseCSV('x\n"a,b",c')[1], ['a,b', 'c']));
+t('雙引號跳脫', () => eq(C.parseCSV('x\n"他說""好""",c')[1], ['他說"好"', 'c']));
+t('引號內的換行保留', () => {
+  const rows = C.parseCSV('x\n"第一行\n第二行",c');
+  eq(rows.length, 2); eq(rows[1][0], '第一行\n第二行');
+});
+t('空白行被丟掉', () => eq(C.parseCSV('a,b\n\n1,2\n\n').length, 2));
+t('LF 與 CRLF 都吃', () => eq(C.parseCSV('a\n1').length, C.parseCSV('a\r\n1').length));
+
+console.log('\n── 數字與日期正規化 ──');
+t('千分位被剝掉', () => eq(C.normNum('12,345.67'), 12345.67));
+t('空白與 MOP 前綴被剝掉', () => { eq(C.normNum(' 1 200 '), 1200); eq(C.normNum('MOP500'), 500); });
+t('空字串不是零', () => ok(Number.isNaN(C.normNum(''))));
+t('接受三種日期分隔', () => {
+  eq(C.normDate('2026-08-01'), '2026-08-01');
+  eq(C.normDate('2026/8/1'), '2026-08-01');
+  eq(C.normDate('2026.8.1'), '2026-08-01');
+});
+t('看不懂的日期回 null，不猜', () => {
+  eq(C.normDate('01/08/2026'), null);
+  eq(C.normDate('8月1日'), null);
+  eq(C.normDate('45870'), null);
+});
+t('月份日期超界回 null', () => { eq(C.normDate('2026-13-01'), null); eq(C.normDate('2026-08-32'), null); });
+
+console.log('\n── CSV 匯入計畫 ──');
+const blank = { entries: [], trips: [], subs: {}, accounts: null };
+function csvOf(list, trips) { return C.toCSV(list, trips || []); }
+
+t('匯出再匯入筆數一致', () => {
+  const src = [E('2026-08-01', '餐飲', 120, { sub: '午餐' }), T('2026-08-07', 1200)];
+  const plan = C.planCSVImport(csvOf(src), blank);
+  eq(plan.errors.length, 0); eq(plan.entries.length, 2);
+});
+t('轉帳的流向兩端都還原', () => {
+  const plan = C.planCSVImport(csvOf([T('2026-08-07', 1200)]), blank);
+  const e = plan.entries[0];
+  eq(e.type, 'transfer'); eq(e.fromAcct, '中銀澳門'); eq(e.toAcct, '大豐銀行');
+});
+t('外幣以原幣×匯率重算，不採用澳門幣金額欄', () => {
+  const csv = '日期,型別,大類,子類,帳戶層,帳戶,幣別,原幣金額,匯率,澳門幣金額\n' +
+              '2026-08-01,支出,餐飲,午餐,現金,現鈔,JPY,4800,0.055,99999';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.entries[0].rate, 0.055);
+  eq(C.toMOP(plan.entries[0]), 264);
+});
+t('外幣缺匯率時由澳門幣金額回推', () => {
+  const csv = '日期,型別,大類,子類,幣別,原幣金額,澳門幣金額\n' +
+              '2026-08-01,支出,餐飲,午餐,HKD,100,103';
+  eq(C.planCSVImport(csv, blank).entries[0].rate, 1.03);
+});
+t('外幣完全沒有匯率線索就報錯', () => {
+  const csv = '日期,型別,大類,子類,幣別,原幣金額\n2026-08-01,支出,餐飲,午餐,HKD,100';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.entries.length, 0); ok(plan.errors[0].msg.indexOf('匯率') >= 0);
+});
+t('欄位順序打亂也能匯入', () => {
+  const csv = '原幣金額,型別,子類,大類,日期\n120,支出,午餐,餐飲,2026-08-01';
+  eq(C.planCSVImport(csv, blank).entries.length, 1);
+});
+t('缺少必要欄位直接擋下', () => {
+  const plan = C.planCSVImport('大類,子類\n餐飲,午餐', blank);
+  eq(plan.entries.length, 0); ok(plan.errors.length >= 1);
+});
+t('空檔案有明確訊息', () => eq(C.planCSVImport('', blank).errors[0].msg, '檔案是空的'));
+
+console.log('\n── CSV 匯入的把關 ──');
+t('不認得的大類報錯，不丟進其他', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,亂寫的類,x,100';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.entries.length, 0);
+  ok(plan.errors[0].msg.indexOf('不認得') >= 0);
+});
+t('壞掉的行不影響其他行', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n' +
+              '2026-08-01,支出,餐飲,午餐,100\n' +
+              'xxx,支出,餐飲,午餐,100\n' +
+              '2026-08-03,支出,交通,的士,50';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.entries.length, 2); eq(plan.errors.length, 1); eq(plan.errors[0].line, 3);
+});
+t('負數與零金額被擋', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,餐飲,午餐,0\n2026-08-02,支出,餐飲,午餐,-5';
+  eq(C.planCSVImport(csv, blank).errors.length, 2);
+});
+t('轉出與轉入同帳戶被擋', () => {
+  const csv = '日期,型別,帳戶層,帳戶,轉出層,轉出帳戶,原幣金額\n' +
+              '2026-08-01,轉帳,現金,現鈔,現金,現鈔,100';
+  ok(C.planCSVImport(csv, blank).errors.length === 1);
+});
+t('與現有紀錄重複的行自動略過', () => {
+  const src = [E('2026-08-01', '餐飲', 120, { sub: '午餐' })];
+  const plan = C.planCSVImport(csvOf(src), { entries: src, trips: [], subs: {} });
+  eq(plan.entries.length, 0); eq(plan.dupes, 1);
+});
+t('檔案內部重複也只留一筆', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,餐飲,午餐,100\n2026-08-01,支出,餐飲,午餐,100';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.entries.length, 1); eq(plan.dupes, 1);
+});
+t('金額不同就不是重複', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,餐飲,午餐,100\n2026-08-01,支出,餐飲,午餐,101';
+  eq(C.planCSVImport(csv, blank).entries.length, 2);
+});
+
+console.log('\n── CSV 匯入的新增項 ──');
+t('沒見過的子類會被登記', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,餐飲,宵夜,100';
+  eq(C.planCSVImport(csv, blank).newSubs['餐飲'], ['宵夜']);
+});
+t('已存在的子類不重複登記', () => {
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,餐飲,午餐,100';
+  eq(Object.keys(C.planCSVImport(csv, blank).newSubs).length, 0);
+});
+t('沒見過的帳戶會被登記', () => {
+  const csv = '日期,型別,大類,子類,帳戶層,帳戶,原幣金額\n2026-08-01,支出,餐飲,午餐,現金,澳娛錢包,100';
+  eq(C.planCSVImport(csv, blank).newAccounts['現金'], ['澳娛錢包']);
+});
+t('未指定帳戶不算新增', () => {
+  const csv = '日期,型別,大類,子類,帳戶層,帳戶,原幣金額\n2026-08-01,支出,餐飲,午餐,現金,,100';
+  eq(Object.keys(C.planCSVImport(csv, blank).newAccounts).length, 0);
+});
+t('行程名對得上就沿用既有 id', () => {
+  const st = { entries: [], trips: [{ id: 't1', name: '大阪', start: '2026-08-16', end: '2026-08-23' }], subs: {} };
+  const csv = '日期,型別,大類,子類,原幣金額,行程\n2026-08-18,支出,餐飲,午餐,100,大阪';
+  const plan = C.planCSVImport(csv, st);
+  eq(plan.entries[0].tripId, 't1'); eq(plan.newTrips.length, 0);
+});
+t('新行程的起訖日由資料推出來', () => {
+  const csv = '日期,型別,大類,子類,原幣金額,行程\n' +
+              '2026-09-18,支出,餐飲,午餐,100,東京\n2026-09-21,支出,餐飲,晚餐,200,東京';
+  const plan = C.planCSVImport(csv, blank);
+  eq(plan.newTrips.length, 1);
+  eq(plan.newTrips[0].start, '2026-09-18'); eq(plan.newTrips[0].end, '2026-09-21');
+});
+
+console.log('\n── 套用匯入計畫 ──');
+t('套用後紀錄被附加而非取代', () => {
+  const st = { entries: [E('2026-07-01', '餐飲', 50)], trips: [], subs: {}, accounts: {} };
+  const csv = '日期,型別,大類,子類,原幣金額\n2026-08-01,支出,交通,的士,60';
+  C.applyCSVPlan(st, C.planCSVImport(csv, st));
+  eq(st.entries.length, 2);
+});
+t('套用後新行程有 id 且已掛上', () => {
+  const st = { entries: [], trips: [], subs: {}, accounts: {} };
+  const csv = '日期,型別,大類,子類,原幣金額,行程\n2026-09-18,支出,餐飲,午餐,100,東京';
+  C.applyCSVPlan(st, C.planCSVImport(csv, st));
+  eq(st.trips.length, 1);
+  eq(st.entries[0].tripId, st.trips[0].id);
+  eq(st.entries[0].__tripName, undefined);
+});
+t('套用後新子類與新帳戶進入設定', () => {
+  const st = { entries: [], trips: [], subs: {}, accounts: {} };
+  const csv = '日期,型別,大類,子類,帳戶層,帳戶,原幣金額\n2026-08-01,支出,餐飲,宵夜,現金,澳娛錢包,100';
+  C.applyCSVPlan(st, C.planCSVImport(csv, st));
+  eq(st.subs['餐飲'], ['宵夜']);
+  ok(C.accountsOf(st, C.CASH).indexOf('澳娛錢包') >= 0);
+});
+t('完整往返：匯出→匯入→統計一致', () => {
+  const src = [
+    E('2026-08-01', '餐飲', 120, { sub: '午餐' }),
+    E('2026-08-02', '交通', 80, { sub: '的士', pay: C.CARD, acct: '大豐銀行' }),
+    T('2026-08-07', 500)
+  ];
+  const st = { entries: [], trips: [], subs: {}, accounts: {} };
+  C.applyCSVPlan(st, C.planCSVImport(csvOf(src), st));
+  eq(C.balance(st.entries, '2026-08').expense, C.balance(src, '2026-08').expense);
+  eq(C.cashBalance(st.entries, '2026-08').repay, 500);
+  eq(C.cardOutstanding(st.entries).total, -420);
+});
+
+
+console.log('\n── 子類明細 ──');
+const subSet = [
+  E('2026-08-01', '餐飲', 300, { sub: '午餐' }), E('2026-08-02', '餐飲', 200, { sub: '午餐' }),
+  E('2026-08-03', '餐飲', 400, { sub: '晚餐' }), E('2026-08-04', '餐飲', 80, { sub: '早餐' }),
+  E('2026-08-05', '餐飲', 60, { sub: '咖啡飲品' }), E('2026-08-06', '餐飲', 40, { sub: '外賣' }),
+  E('2026-08-07', '交通', 999, { sub: '的士' })
+];
+t('只算指定大類', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  eq(b.total, 1080); eq(b.count, 6);
+});
+t('依金額排序取前三', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  eq(b.top.map(r => r.sub), ['午餐', '晚餐', '早餐']);
+  eq(b.top[0].amount, 500);
+});
+t('同子類會合併並計筆數', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  eq(b.top[0].count, 2);
+});
+t('佔比以該大類為分母', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  ok(Math.abs(b.top[0].share - 500 / 1080) < 1e-9);
+});
+t('其餘項併成一行', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  eq(b.rest.items, 2); eq(b.rest.amount, 100);
+});
+t('前三加其餘等於總額', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all');
+  const sum = b.top.reduce((s, r) => s + r.amount, 0) + b.rest.amount;
+  eq(C.round2(sum), b.total);
+});
+t('不足三項時其餘為零', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '交通', 31, 'all');
+  eq(b.top.length, 1); eq(b.rest.items, 0); eq(b.rest.amount, 0);
+});
+t('沒有紀錄時不除以零', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '居住', 31, 'all');
+  eq(b.total, 0); eq(b.all.length, 0); eq(b.rest.share, 0);
+});
+t('沿用當前的旅行檢視', () => {
+  const withTrip = subSet.concat([E('2026-08-10', '餐飲', 5000, { sub: '聚餐請客', tripId: 't1' })]);
+  eq(C.subBreakdown(withTrip, '2026-08', '餐飲', 31, 'exclude').total, 1080);
+  eq(C.subBreakdown(withTrip, '2026-08', '餐飲', 31, 'all').total, 6080);
+});
+t('沿用同期天數截斷', () => {
+  eq(C.subBreakdown(subSet, '2026-08', '餐飲', 2, 'all').total, 500);
+});
+t('轉帳不進子類明細', () => {
+  const withT = subSet.concat([T('2026-08-09', 900)]);
+  eq(C.subBreakdown(withT, '2026-08', '餐飲', 31, 'all').count, 6);
+});
+t('可調整取前幾項', () => {
+  const b = C.subBreakdown(subSet, '2026-08', '餐飲', 31, 'all', null, 5);
+  eq(b.top.length, 5); eq(b.rest.items, 0);   // 餐飲共 5 個子類，取 5 就沒有其餘
+});
+
 console.log('\n' + '─'.repeat(40));
 console.log(`通過 ${pass} 項，失敗 ${fail} 項`);
 process.exit(fail ? 1 : 0);

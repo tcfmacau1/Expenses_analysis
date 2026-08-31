@@ -20,6 +20,7 @@ def seed(page, entries, trips=None, templates=None, cardDue=None):
         }));
     }""", [entries, trips or [], templates or [], cardDue or {}])
     page.reload()
+    page.click("#nav button[data-v='stats']")
 
 def E(id, date, cat, amount, **kw):
     d = dict(id=id, type='expense', date=date, cat=cat, sub='未分類', pay='現金', acct='現鈔',
@@ -44,8 +45,11 @@ with sync_playwright() as p:
     page.wait_for_selector("header h1")
     check("標題正確", page.inner_text("header h1") == "消費統計")
     check("四個分頁按鈕", page.locator("#nav button").count() == 4)
+    check("開 App 落在記一筆", page.locator("#v-add").is_visible())
+    check("記一筆是第一格", page.locator("#nav button").first.get_attribute("data-v") == "add")
+    check("統計排第二格", page.locator("#nav button").nth(1).get_attribute("data-v") == "stats")
+    page.click("#nav button[data-v='stats']")
     check("空月份顯示邀請語", "本月還沒有紀錄" in page.inner_text("#v-stats"))
-    check("預設在統計頁", page.locator("#v-stats").is_visible())
 
     print("\n── 記一筆：兩下完成 ──")
     page.click("#nav button[data-v='add']")
@@ -156,18 +160,55 @@ with sync_playwright() as p:
     check("其他超 10% 觸發檢討提示", "分類體系需要檢討" in page.inner_text("#v-stats"))
 
     print("\n── 月中同期比對 ──")
-    # 前三月的月底大額落在同期之外，只有月初小額該進基準
-    late = min(28, DAY + 1) if DAY < 28 else 28
-    seed(page, [E('p%d' % i, '%s-%02d' % (m, late), '餐飲', 8000) for i, m in
-                enumerate(['2026-05', '2026-06', '2026-07'])] +
-               [E('q%d' % i, m + '-03', '餐飲', 500) for i, m in
-                enumerate(['2026-05', '2026-06', '2026-07'])] +
-               [E('now', '2026-08-03', '餐飲', 520)])
+    # 前三月「今天之後」的大額必須落在同期之外，只有月初小額該進基準
+    if DAY <= 28:
+        late = DAY + 2
+        seed(page, [E('p%d' % i, '%s-%02d' % (m, late), '餐飲', 8000) for i, m in
+                    enumerate(['2026-05', '2026-06', '2026-07'])] +
+                   [E('q%d' % i, m + '-03', '餐飲', 500) for i, m in
+                    enumerate(['2026-05', '2026-06', '2026-07'])] +
+                   [E('now', '2026-08-03', '餐飲', 520)])
+        page.evaluate("window.__app.setYM('2026-08')")
+        detail = page.inner_text("#v-stats")
+        check("同期均值只取月初 500", "近三月同期均值 500.00" in detail)
+        check("整月的 8,500 不進同期基準", "8,500.00" not in detail)
+        check("月中只算到今天", ("至 %d 日" % DAY) in detail)
+    else:
+        print("  · 今天是月底第 %d 天，同期比對測試略過（需要今天之後還有日子）" % DAY)
+
+    print("\n── 點大類展開子類 ──")
+    seed(page, [
+        E('u1', '2026-08-01', '餐飲', 300, sub='午餐'),
+        E('u2', '2026-08-02', '餐飲', 200, sub='午餐'),
+        E('u3', '2026-08-03', '餐飲', 400, sub='晚餐'),
+        E('u4', '2026-08-04', '餐飲', 80, sub='早餐'),
+        E('u5', '2026-08-05', '餐飲', 60, sub='咖啡飲品'),
+        E('u6', '2026-08-06', '餐飲', 40, sub='外賣'),
+        E('u7', '2026-08-07', '交通', 999, sub='的士')])
     page.evaluate("window.__app.setYM('2026-08')")
-    detail = page.inner_text("#v-stats")
-    check("同期均值只取月初 500", "近三月同期均值 500.00" in detail)
-    check("整月的 8,500 不進同期基準", "8,500.00" not in detail)
-    check("月中只算到今天", ("至 %d 日" % DAY) in detail)
+    check("預設不展開", page.locator(".subpanel").count() == 0)
+    page.click(".band:has-text('餐飲')")
+    check("點一下展開子類面板", page.locator(".subpanel").count() == 1)
+    sp = page.inner_text(".subpanel")
+    check("面板標明是哪一類", "餐飲 子類明細" in sp)
+    check("顯示該類合計", "1,080.00" in sp)
+    check("只列前三項", page.locator(".subrow:not(.rest)").count() == 3)
+    check("前三是午餐晚餐早餐", "午餐" in sp and "晚餐" in sp and "早餐" in sp)
+    check("午餐兩筆已合併", "500.00" in sp and "2 筆" in sp)
+    check("佔比以該類為分母", "46.3%" in sp)
+    check("其餘併成一行", "其餘 2 項" in sp and "100.00" in sp)
+    page.click("button.submore")
+    check("可展開全部", page.locator(".subrow:not(.rest)").count() == 5)
+    check("展開後沒有其餘行", page.locator(".subrow.rest").count() == 0)
+    page.click("button.submore")
+    check("可收回前三項", page.locator(".subrow:not(.rest)").count() == 3)
+    page.click(".band:has-text('餐飲')")
+    check("再點一下收起", page.locator(".subpanel").count() == 0)
+    page.click(".band:has-text('交通')")
+    check("只有一項時不出現其餘行", page.locator(".subrow.rest").count() == 0)
+    check("只有一項時不給展開鍵", page.locator("button.submore").count() == 0)
+    page.click("#moPrev")
+    check("換月份自動收起", page.locator(".subpanel").count() == 0)
 
     print("\n── 補登與修改 ──")
     seed(page, [E('z', '2026-08-05', '餐飲', 100)])
@@ -326,12 +367,82 @@ with sync_playwright() as p:
         }));
     }""")
     page.reload()
+    page.click("#nav button[data-v='stats']")
     page.evaluate("window.__app.setYM('2026-08')")
     mig = page.evaluate("JSON.parse(localStorage.getItem('expanal_v1'))")
     check("遷移後 schema 升到 3", mig["schema"] == 3)
     check("手機支付轉成 MPay", mig["entries"][0]["acct"] == "MPay")
     check("舊卡片對回帳戶名", mig["entries"][1]["acct"] == "大豐銀行")
     check("遷移後金額不變", "200.00" in page.inner_text("#v-stats"))
+
+    print("\n── CSV 匯入 ──")
+    seed(page, [E('c1', '2026-08-01', '餐飲', 120, sub='午餐')])
+    page.click("#nav button[data-v='set']")
+    check("設定頁有匯入 CSV 按鈕", "匯入 CSV" in page.inner_text("#v-set"))
+    check("說明 CSV 是附加不是取代", "不會蓋掉現有紀錄" in page.inner_text("#v-set"))
+
+    good = ("日期,型別,大類,子類,帳戶層,帳戶,幣別,原幣金額,匯率,行程\r\n"
+            "2026-08-05,支出,交通,的士,現金,MPay,MOP,60,1,\r\n"
+            "2026-08-06,支出,餐飲,宵夜,信用卡,大豐銀行,MOP,88,1,\r\n"
+            "2026-08-01,支出,餐飲,午餐,現金,現鈔,MOP,120,1,\r\n"
+            "2026-08-07,轉帳,,,信用卡,大豐銀行,MOP,500,1,\r\n"
+            "壞日期,支出,餐飲,午餐,現金,現鈔,MOP,10,1,\r\n"
+            "2026-08-09,支出,不存在的類,x,現金,現鈔,MOP,10,1,\r\n")
+    pathlib.Path('/tmp/imp.csv').write_text(good, encoding='utf-8')
+    page.set_input_files("#importCSVFile", "/tmp/imp.csv")
+    page.wait_for_selector(".modal")
+    rep = page.inner_text(".modal")
+    check("預覽顯示可匯入筆數", "3 筆" in rep)
+    check("預覽顯示重複略過", "重複略過" in rep)
+    check("重複的午餐被認出", rep.count("1 筆") >= 1)
+    check("列出壞日期那一行", "第 6 行" in rep)
+    check("列出不認得的大類", "不認得" in rep)
+    check("提示新增子類", "宵夜" in rep)
+    check("聲明大類不會被新增", "大類不會被新增" in rep)
+    page.click("#csvConfirm")
+    page.wait_for_selector(".toast")
+    after = page.evaluate("JSON.parse(localStorage.getItem('expanal_v1'))")
+    check("紀錄被附加而非取代", len(after["entries"]) == 4)
+    check("轉帳型別正確寫入", any(e["type"] == "transfer" for e in after["entries"]))
+    check("新子類寫進設定", "宵夜" in after["subs"].get("餐飲", []))
+    page.click("#nav button[data-v='stats']")
+    page.evaluate("window.__app.setYM('2026-08')")
+    check("匯入後統計含新資料", "268.00" in page.inner_text("#v-stats"))
+
+    print("\n── CSV 匯入的把關 ──")
+    seed(page, [])
+    page.click("#nav button[data-v='set']")
+    pathlib.Path('/tmp/bad.csv').write_text("大類,子類\r\n餐飲,午餐\r\n", encoding='utf-8')
+    page.set_input_files("#importCSVFile", "/tmp/bad.csv")
+    page.wait_for_selector(".modal")
+    check("缺欄位時擋下並說明", "缺少必要欄位" in page.inner_text(".modal"))
+    check("沒東西可匯入時按鈕停用", page.locator("#csvConfirm").is_disabled())
+    page.click(".modal button:has-text('取消')")
+    check("取消後沒有寫入", page.evaluate("JSON.parse(localStorage.getItem('expanal_v1')).entries.length") == 0)
+
+    print("\n── CSV 往返 ──")
+    seed(page, [E('r1', '2026-08-01', '餐飲', 120, sub='午餐'),
+                E('r2', '2026-08-02', '交通', 4800, sub='機票車票', currency='JPY', rate=0.055)])
+    page.click("#nav button[data-v='set']")
+    with page.expect_download() as dl3:
+        page.click("button:has-text('匯出 CSV')")
+    out = pathlib.Path(dl3.value.path()).read_bytes().decode("utf-8-sig")
+    pathlib.Path('/tmp/round.csv').write_text(out, encoding='utf-8')
+    page.evaluate("""() => {
+        const s = JSON.parse(localStorage.getItem('expanal_v1'));
+        s.entries = []; localStorage.setItem('expanal_v1', JSON.stringify(s));
+    }""")
+    page.reload()
+    page.click("#nav button[data-v='set']")
+    page.set_input_files("#importCSVFile", "/tmp/round.csv")
+    page.wait_for_selector(".modal")
+    page.click("#csvConfirm")
+    page.wait_for_selector(".toast")
+    back = page.evaluate("JSON.parse(localStorage.getItem('expanal_v1')).entries")
+    check("往返後筆數一致", len(back) == 2)
+    jpy = [e for e in back if e["currency"] == "JPY"][0]
+    check("往返後原幣金額保留", jpy["amount"] == 4800)
+    check("往返後匯率保留", jpy["rate"] == 0.055)
 
     print("\n── 規則說明 ──")
     page.click("#nav button[data-v='set']")
@@ -340,6 +451,7 @@ with sync_playwright() as p:
     check("說明寫明 2000 門檻", "2000 MOP" in txt)
     check("說明為何寫已記錄", "不代表你花掉的" in txt)
     check("說明信用卡雙軌", "就雙重計算" in txt)
+    check("說明 CSV 匯入規矩", "不採用「澳門幣金額」那一欄" in txt)
 
     print("\n── 月份切換 ──")
     page.click("#nav button[data-v='stats']")

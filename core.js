@@ -236,6 +236,36 @@
       .filter(function (e) { return e.pay === CARD; }));
   }
 
+
+  // ── 子類明細（點大類展開）──────────────────────────────────────
+  // 預設只給佔比最前三項，其餘併成一行——超過三項就不再是「一眼看懂」。
+  function subBreakdown(entries, ym, cat, throughDay, tripMode, tripId, topN) {
+    topN = topN || 3;
+    var list = filterEntries(entries, {
+      ym: ym, type: 'expense', tripMode: tripMode || 'exclude', tripId: tripId, throughDay: throughDay
+    }).filter(function (e) { return e.cat === cat; });
+    var sums = {}, counts = {};
+    list.forEach(function (e) {
+      var k = e.sub || '未分類';
+      sums[k] = round2((sums[k] || 0) + toMOP(e));
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    var total = round2(list.reduce(function (s, e) { return s + toMOP(e); }, 0));
+    var all = Object.keys(sums).map(function (k) {
+      return { sub: k, amount: sums[k], count: counts[k], share: total > 0 ? sums[k] / total : 0 };
+    }).sort(function (a, b) { return b.amount - a.amount; });
+    var top = all.slice(0, topN);
+    var rest = all.slice(topN);
+    return {
+      cat: cat, total: total, count: list.length, all: all, top: top,
+      rest: {
+        items: rest.length,
+        amount: round2(rest.reduce(function (s, r) { return s + r.amount; }, 0)),
+        share: total > 0 ? rest.reduce(function (s, r) { return s + r.amount; }, 0) / total : 0
+      }
+    };
+  }
+
   // ── 行程 ──────────────────────────────────────────────────────
   function tripForDate(trips, date) {
     var hit = (trips || []).filter(function (t) { return date >= t.start && date <= t.end; });
@@ -293,6 +323,229 @@
       });
     return '\ufeff' + [head.map(csvCell).join(',')].concat(rows).join('\r\n');
   }
+
+
+  // ── CSV 匯入 ──────────────────────────────────────────────────
+  // 進來的檔案不受控制：Excel 會改日期格式、加千分位、動欄位順序。
+  // 因此一律以「欄位名稱」對應，而非欄位位置；金額一律由原幣×匯率重算，
+  // 絕不採用匯出檔裡的「澳門幣金額」（那是顯示值，不是儲存值）。
+  function parseCSV(text) {
+    if (!text) return [];
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    var rows = [], row = [], cur = '', i = 0, inQ = false;
+    while (i < text.length) {
+      var c = text[i];
+      if (inQ) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { cur += '"'; i += 2; continue; }
+          inQ = false; i++; continue;
+        }
+        cur += c; i++; continue;
+      }
+      if (c === '"') { inQ = true; i++; continue; }
+      if (c === ',') { row.push(cur); cur = ''; i++; continue; }
+      if (c === '\r') { i++; continue; }
+      if (c === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
+      cur += c; i++;
+    }
+    if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+    return rows.filter(function (r) {
+      return r.some(function (x) { return String(x).trim() !== ''; });
+    });
+  }
+
+  function normNum(v) {
+    if (v === null || v === undefined) return NaN;
+    var s = String(v).replace(/[,\s\u00A0]/g, '').replace(/^MOP/i, '');
+    if (s === '') return NaN;
+    return Number(s);
+  }
+
+  // 接受 2026-08-01、2026/8/1、2026.8.1；其餘一律當錯誤，不猜。
+  function normDate(v) {
+    var s = String(v || '').trim();
+    var m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+    if (!m) return null;
+    var y = m[1], mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+
+  var KIND_MAP = { '支出': 'expense', '收入': 'income', '轉帳': 'transfer',
+                   'expense': 'expense', 'income': 'income', 'transfer': 'transfer' };
+
+  function dedupKey(e) {
+    return [e.type, e.date, e.amount, e.currency, e.cat || '', e.sub || '',
+            e.pay || '', e.acct || '', e.fromPay || '', e.fromAcct || '',
+            e.toPay || '', e.toAcct || ''].join('|');
+  }
+
+  // 回傳一份「計畫」而不直接改狀態，讓使用者先看報告再決定。
+  function planCSVImport(text, state) {
+    var out = { entries: [], errors: [], dupes: 0,
+                newSubs: {}, newAccounts: {}, newTrips: [], total: 0 };
+    var rows = parseCSV(text);
+    if (!rows.length) { out.errors.push({ line: 0, msg: '檔案是空的' }); return out; }
+
+    var head = rows[0].map(function (h) { return String(h).trim(); });
+    var idx = {};
+    head.forEach(function (h, i) { idx[h] = i; });
+    ['日期', '型別', '原幣金額'].forEach(function (need) {
+      if (!(need in idx)) out.errors.push({ line: 1, msg: '缺少必要欄位「' + need + '」' });
+    });
+    if (out.errors.length) return out;
+
+    function cell(r, name) {
+      var i = idx[name];
+      return (i === undefined || r[i] === undefined) ? '' : String(r[i]).trim();
+    }
+
+    var catNames = CATS.map(function (c) { return c.name; });
+    var incNames = INCOME_CATS.map(function (c) { return c.name; });
+    var existing = {};
+    ((state && state.entries) || []).forEach(function (e) { existing[dedupKey(e)] = 1; });
+    var knownAcct = {};
+    LAYERS.forEach(function (L) {
+      knownAcct[L] = {};
+      accountsOf(state, L).forEach(function (a) { knownAcct[L][a] = 1; });
+    });
+    var tripByName = {};
+    ((state && state.trips) || []).forEach(function (t) { tripByName[t.name] = t.id; });
+    var pendingTrips = {};
+
+    for (var r = 1; r < rows.length; r++) {
+      var line = r + 1;
+      var row = rows[r];
+      out.total++;
+
+      var date = normDate(cell(row, '日期'));
+      if (!date) { out.errors.push({ line: line, msg: '日期看不懂：' + cell(row, '日期') }); continue; }
+
+      var type = KIND_MAP[cell(row, '型別')];
+      if (!type) { out.errors.push({ line: line, msg: '型別要是 支出／收入／轉帳' }); continue; }
+
+      var amount = normNum(cell(row, '原幣金額'));
+      if (!(amount > 0)) { out.errors.push({ line: line, msg: '金額無效：' + cell(row, '原幣金額') }); continue; }
+      amount = round2(amount);
+
+      var currency = cell(row, '幣別') || 'MOP';
+      if (CURRENCIES.indexOf(currency) < 0) {
+        out.errors.push({ line: line, msg: '不支援的幣別：' + currency }); continue;
+      }
+      var rate = 1;
+      if (currency !== 'MOP') {
+        rate = normNum(cell(row, '匯率'));
+        if (!(rate > 0)) {
+          // 沒有匯率就用澳門幣金額回推，仍然不直接採用它當金額
+          var mop = normNum(cell(row, '澳門幣金額'));
+          rate = (mop > 0) ? round2(mop / amount) : NaN;
+        }
+        if (!(rate > 0)) { out.errors.push({ line: line, msg: '外幣缺少匯率' }); continue; }
+      }
+
+      var e = {
+        id: 'csv' + line + '_' + Math.random().toString(36).slice(2, 7),
+        type: type, date: date, amount: amount, currency: currency, rate: rate,
+        merchant: cell(row, '店家'), note: cell(row, '備註'),
+        createdAt: new Date().toISOString()
+      };
+
+      var layer = cell(row, '帳戶層') || CASH;
+      if (LAYERS.indexOf(layer) < 0) { out.errors.push({ line: line, msg: '帳戶層要是 現金 或 信用卡' }); continue; }
+      var acct = cell(row, '帳戶') || UNASSIGNED;
+
+      if (type === 'transfer') {
+        var fromLayer = cell(row, '轉出層') || CASH;
+        if (LAYERS.indexOf(fromLayer) < 0) { out.errors.push({ line: line, msg: '轉出層要是 現金 或 信用卡' }); continue; }
+        var fromAcct = cell(row, '轉出帳戶') || UNASSIGNED;
+        if (fromLayer === layer && fromAcct === acct) {
+          out.errors.push({ line: line, msg: '轉出與轉入是同一個帳戶' }); continue;
+        }
+        e.fromPay = fromLayer; e.fromAcct = fromAcct;
+        e.toPay = layer; e.toAcct = acct;
+        e.tripId = null;
+        [[fromLayer, fromAcct], [layer, acct]].forEach(function (pair) {
+          noteAccount(out, knownAcct, pair[0], pair[1]);
+        });
+      } else {
+        var cat = cell(row, '大類');
+        var pool = (type === 'income') ? incNames : catNames;
+        if (pool.indexOf(cat) < 0) {
+          out.errors.push({ line: line, msg: '不認得的' + (type === 'income' ? '收入類別' : '大類') + '：' + (cat || '(空白)') });
+          continue;
+        }
+        var sub = cell(row, '子類') || '未分類';
+        e.cat = cat; e.sub = sub; e.pay = layer; e.acct = acct;
+        var known = (type === 'income' ? INCOME_CATS : CATS)
+          .filter(function (c) { return c.name === cat; })[0].subs;
+        var extra = ((state && state.subs && state.subs[cat]) || []);
+        if (known.indexOf(sub) < 0 && extra.indexOf(sub) < 0) {
+          out.newSubs[cat] = out.newSubs[cat] || [];
+          if (out.newSubs[cat].indexOf(sub) < 0) out.newSubs[cat].push(sub);
+        }
+        noteAccount(out, knownAcct, layer, acct);
+
+        var tname = cell(row, '行程');
+        if (tname) {
+          if (tripByName[tname]) {
+            e.tripId = tripByName[tname];
+          } else {
+            if (!pendingTrips[tname]) pendingTrips[tname] = { name: tname, start: date, end: date };
+            if (date < pendingTrips[tname].start) pendingTrips[tname].start = date;
+            if (date > pendingTrips[tname].end) pendingTrips[tname].end = date;
+            e.__tripName = tname;
+          }
+        } else {
+          e.tripId = null;
+        }
+      }
+
+      var k = dedupKey(e);
+      if (existing[k]) { out.dupes++; continue; }
+      existing[k] = 1;
+      out.entries.push(e);
+    }
+
+    Object.keys(pendingTrips).forEach(function (n) { out.newTrips.push(pendingTrips[n]); });
+    return out;
+  }
+
+  function noteAccount(out, knownAcct, layer, acct) {
+    if (acct === UNASSIGNED) return;
+    if (knownAcct[layer] && knownAcct[layer][acct]) return;
+    out.newAccounts[layer] = out.newAccounts[layer] || [];
+    if (out.newAccounts[layer].indexOf(acct) < 0) out.newAccounts[layer].push(acct);
+    if (knownAcct[layer]) knownAcct[layer][acct] = 1;
+  }
+
+  // 把計畫套用到狀態上（附加，不取代）
+  function applyCSVPlan(state, plan) {
+    plan.newTrips.forEach(function (t) {
+      var id = 'tcsv' + Math.random().toString(36).slice(2, 8);
+      state.trips.push({ id: id, name: t.name, start: t.start, end: t.end });
+      plan.entries.forEach(function (e) {
+        if (e.__tripName === t.name) { e.tripId = id; }
+      });
+    });
+    Object.keys(plan.newSubs).forEach(function (cat) {
+      state.subs[cat] = state.subs[cat] || [];
+      plan.newSubs[cat].forEach(function (s) {
+        if (state.subs[cat].indexOf(s) < 0) state.subs[cat].push(s);
+      });
+    });
+    Object.keys(plan.newAccounts).forEach(function (L) {
+      var cur = accountsOf(state, L);
+      plan.newAccounts[L].forEach(function (a) { if (cur.indexOf(a) < 0) cur.push(a); });
+      state.accounts[L] = cur;
+    });
+    plan.entries.forEach(function (e) {
+      delete e.__tripName;
+      if (e.tripId === undefined) e.tripId = null;
+      state.entries.push(e);
+    });
+    return state;
+  }
+
 
   // ── 匯入驗證 ──────────────────────────────────────────────────
   function validateImport(obj) {
@@ -393,7 +646,9 @@
     cardOutstanding: cardOutstanding, cardCharged: cardCharged,
     tripForDate: tripForDate, bumpFreq: bumpFreq, sortByFreq: sortByFreq, topOf: topOf,
     csvCell: csvCell, toCSV: toCSV, validateImport: validateImport, migrate: migrate,
-    monthReport: monthReport, byAccount: byAccount
+    parseCSV: parseCSV, normNum: normNum, normDate: normDate,
+    planCSVImport: planCSVImport, applyCSVPlan: applyCSVPlan, dedupKey: dedupKey,
+    monthReport: monthReport, byAccount: byAccount, subBreakdown: subBreakdown
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
