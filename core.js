@@ -269,16 +269,16 @@
 
   // ── 月度趨勢 ──────────────────────────────────────────────────
   // 看的是當月的 1–N 日對比往月的 1–N 日；拿殘缺的本月去比完整的往月是騙自己。
-  function monthlySeries(entries, ym, months, tripMode, throughDay) {
+  function monthlySeries(entries, ym, months, tripMode, throughDay, tripId) {
     months = months || 6;
     tripMode = tripMode || 'exclude';
     var rows = [];
     for (var i = months - 1; i >= 0; i--) {
       var m = shiftYM(ym, -i);
       var cap = throughDay ? Math.min(throughDay, daysInMonth(m)) : daysInMonth(m);
-      var exp = sumMOP(filterEntries(entries, { ym: m, type: 'expense', tripMode: tripMode, throughDay: cap }));
-      var inc = sumMOP(filterEntries(entries, { ym: m, type: 'income', tripMode: 'all', throughDay: cap }));
-      var any = filterEntries(entries, { ym: m, tripMode: 'all', throughDay: cap }).length > 0;
+      var exp = sumMOP(filterEntries(entries, { ym: m, type: 'expense', tripMode: tripMode, tripId: tripId, throughDay: cap }));
+      var inc = sumMOP(filterEntries(entries, { ym: m, type: 'income', tripMode: tripMode, tripId: tripId, throughDay: cap }));
+      var any = filterEntries(entries, { ym: m, tripMode: tripMode, tripId: tripId, throughDay: cap }).length > 0;
       rows.push({ ym: m, expense: exp, income: inc, net: round2(inc - exp), has: any, isCurrent: m === ym });
     }
     var withData = rows.filter(function (r) { return r.has; });
@@ -287,7 +287,9 @@
     var avgExp = withData.length
       ? round2(withData.reduce(function (s, r) { return s + r.expense; }, 0) / withData.length)
       : 0;
-    return { rows: rows, max: max, avgExpense: avgExp, monthsWithData: withData.length, throughDay: throughDay || null };
+    var avgInc = withData.length
+      ? round2(withData.reduce(function (s,r){ return s+r.income; },0)/withData.length) : 0;
+    return { rows: rows, max: max, avgExpense: avgExp, avgIncome: avgInc, monthsWithData: withData.length, throughDay: throughDay || null };
   }
 
   // ── 偏差：本月同期 vs 近三月同期均值 ──────────────────────────

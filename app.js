@@ -67,29 +67,27 @@ function svgText(x,y,txt,attrs){
   t.textContent=txt; return t;
 }
 
-/* 月度趨勢：收入與支出雙柱，虛線為有資料月份的支出平均 */
-function trendChart(){
-  var td = isCurrentMonth() ? throughDay() : null;
-  var partial = !!(td && td < C.daysInMonth(ym));   // 月底時 1–31 日就是整月，不必特別聲明
-  var ser = C.monthlySeries(S.entries, ym, 6, tripMode, td);
-  if(ser.monthsWithData < 2) return null;
-
-  var card = el('div','card');
-  card.appendChild(el('p','eyebrow','近六個月趨勢'+(partial? '（各月 1–'+td+' 日）':'')));
+/* 收支共用日期範圍、有效月份及繪圖邏輯。 */
+function trendChart(ser, type){
+  var income=type==='income', label=income?'收入':'支出';
+  var color=income?'var(--sky-deep)':'var(--s3)';
+  var td=ser.throughDay, partial=td && td<C.daysInMonth(ym);
+  var card=el('div','card');
+  card.appendChild(el('p','eyebrow',label+'趨勢 · 近六個月'+(partial?'（各月 1–'+td+' 日）':'')));
 
   var W=600, H=210, padL=8, padR=8, padT=14, padB=26;
   var plotH = H-padT-padB, plotW = W-padL-padR;
   var svg = svgEl('svg', {viewBox:'0 0 '+W+' '+H,
                           preserveAspectRatio:'xMidYMid meet', role:'img'});
   svg.style.width='100%'; svg.style.height='auto'; svg.style.display='block';
-  svg.setAttribute('aria-label','近六個月收入與支出趨勢');
-  var max = ser.max || 1;
+  svg.setAttribute('aria-label','近六個月'+label+'趨勢');
+  var max = Math.max(1,...ser.rows.map(function(r){return r[type];}));
   var slot = plotW/ser.rows.length;
   var bw = Math.min(26, slot*0.30);
 
-  // 平均支出基準線
-  if(ser.avgExpense>0){
-    var ay = padT + plotH - (ser.avgExpense/max)*plotH;
+  var average=income?ser.avgIncome:ser.avgExpense;
+  if(average>0){
+    var ay = padT + plotH - (average/max)*plotH;
     svg.appendChild(svgEl('line',{x1:padL,y1:ay,x2:W-padR,y2:ay,
       stroke:'var(--sky-deep)','stroke-width':1,'stroke-dasharray':'4 4','opacity':.5}));
   }
@@ -100,12 +98,10 @@ function trendChart(){
       svg.appendChild(svgText(cx, padT+plotH-6, '無資料',
         {'text-anchor':'middle','font-size':9,fill:'var(--mute)'}));
     } else {
-      var ih = (r.income/max)*plotH, eh = (r.expense/max)*plotH;
-      svg.appendChild(svgEl('rect',{x:cx-bw-2, y:padT+plotH-ih, width:bw, height:Math.max(ih,1),
-        fill:'var(--s6)', rx:2}));
-      svg.appendChild(svgEl('rect',{x:cx+2, y:padT+plotH-eh, width:bw, height:Math.max(eh,1),
-        fill: r.isCurrent? 'var(--s1)':'var(--s3)', rx:2}));
-      svg.appendChild(svgText(cx+2+bw/2, padT+plotH-eh-4, money(r.expense),
+      var height=r[type]/max*plotH;
+      svg.appendChild(svgEl('rect',{x:cx-bw/2, y:padT+plotH-height, width:bw, height:height,
+        fill:color, rx:2}));
+      svg.appendChild(svgText(cx, padT+plotH-height-4, money(r[type]),
         {'text-anchor':'middle','font-size':9.5,fill:'var(--ink)','font-family':'var(--f-num)'}));
     }
     svg.appendChild(svgText(cx, H-9, r.ym.slice(5)+' 月',
@@ -121,9 +117,8 @@ function trendChart(){
 
   var lg = el('div','legend');
   var l1=el('span','');
-  l1.appendChild(swatch('var(--s6)')); l1.appendChild(el('span','','收入　'));
-  l1.appendChild(swatch('var(--s3)')); l1.appendChild(el('span','','支出'));
-  if(ser.avgExpense>0) l1.appendChild(el('span','','　┄ 支出均 '+money(ser.avgExpense)));
+  l1.appendChild(swatch(color));
+  l1.appendChild(el('span','',label+'均 '+money(average)));
   lg.appendChild(l1);
   lg.appendChild(el('span','', tripMode==='exclude'?'不含旅行':(tripMode==='only'?'只看旅行':'含旅行')));
   card.appendChild(lg);
@@ -260,7 +255,6 @@ function renderStats(){
   var rep = C.monthReport(S.entries, ym, throughDay(), tripMode, onlyTripId);
   var bal = C.balance(S.entries, ym);
   var cash = C.cashBalance(S.entries, ym);
-  var out = C.cardOutstanding(S.entries, ym);
 
   /* 消費基準 */
   var bc = el('div','card');
@@ -320,37 +314,12 @@ function renderStats(){
   cc.appendChild(callout('info','還款是「現金層 → 信用卡層」的資金搬運，不是消費，所以不影響上方的支出構成。'));
   host.appendChild(cc);
 
-  /* 信用卡未還 */
-  if(out.rows.length){
-    var oc = el('div','card');
-    oc.appendChild(el('p','eyebrow','信用卡未還 · 起用以來累計'));
-    var th3 = el('div','thead');
-    th3.appendChild(el('span','','卡片　／　已刷　−　已還'));
-    th3.appendChild(el('span','','未還'));
-    oc.appendChild(th3);
-    out.rows.forEach(function(r){
-      var rw = el('div','row'); rw.style.cursor='default';
-      var l = el('span','l');
-      l.appendChild(el('span','t', r.acct));
-      l.appendChild(el('span','sub', '已刷 '+money(r.charged)+'　已還 '+money(r.repaid)));
-      rw.appendChild(l);
-      var v = el('span','v', money(r.outstanding));
-      if(r.outstanding>0) v.style.color='var(--amber-hi)';
-      if(r.outstanding<0) v.style.color='var(--sig)';
-      rw.appendChild(v);
-      oc.appendChild(rw);
-    });
-    var tot = el('div','bal');
-    var tr = cell('未還合計', money(out.total), out.total>0?'':'pos'); tr.className='cell net';
-    tot.appendChild(tr);
-    oc.appendChild(tot);
-    oc.appendChild(callout('info','沒有設期初餘額，這是「自你開始記帳以來」的變動額，不是真實欠款總額。'));
-    host.appendChild(oc);
+  var cutoff=isCurrentMonth() ? throughDay() : null;
+  var series=C.monthlySeries(S.entries, ym, 6, tripMode, cutoff, onlyTripId);
+  if(series.monthsWithData>=2){
+    host.appendChild(trendChart(series,'expense'));
+    host.appendChild(trendChart(series,'income'));
   }
-
-  /* 月度趨勢 */
-  var tc2 = trendChart();
-  if(tc2) host.appendChild(tc2);
 
   /* 地層剖面 */
   var sc = el('div','card');
@@ -1092,11 +1061,11 @@ function renderSet(){
   vv.appendChild(el('span','', '　手機與電腦看到的版本號一樣，才是同一份。'));
   vb.appendChild(vt); vb.appendChild(vv);
   rc.appendChild(vb);
-  var refresh=el('button','btn ghost sm','清除快取並重新載入');
+  var refresh=el('button','btn ghost sm','檢查更新');
   refresh.id='btnForceRefresh';
-  refresh.onclick=function(){
-    if(confirm('會清掉離線快取並重新下載最新版本。你的紀錄不受影響（存在別的地方）。繼續？')) forceRefresh();
-  };
+  refresh.onclick=function(){checkUpdate(true);};
+  rc.appendChild(el('p','tiny muted',navigator.serviceWorker && navigator.serviceWorker.controller?
+    '已可離線使用':'首次使用請保持連線，讓程式完成離線準備。'));
   rc.appendChild(refresh);
 
   var wipe=el('button','btn danger sm','清除全部資料');
@@ -1363,43 +1332,55 @@ go('add');
 
 /* ── 版本與更新 ───────────────────────────────────────── */
 var BUILD = window.__BUILD || 'dev';
-var swReg = null, reloading = false;
+var swReg=null, installingUpdate=false, offeredWorker=null;
 
-if('serviceWorker' in navigator){
-  window.addEventListener('load', function(){
-    navigator.serviceWorker.register('sw.js', { updateViaCache:'none' })
-      .then(function(reg){
-        swReg = reg;
-        reg.update().catch(function(){});
-        // 每次回到前景再檢查一次，避免手機長期掛著舊版
-        document.addEventListener('visibilitychange', function(){
-          if(!document.hidden && swReg) swReg.update().catch(function(){});
-        });
-      })
-      .catch(function(){});
-    navigator.serviceWorker.addEventListener('controllerchange', function(){
-      if(reloading) return;
-      reloading = true;
-      location.reload();
-    });
-  });
+function offerUpdate(worker){
+  if(!worker || !navigator.serviceWorker.controller || offeredWorker===worker) return;
+  offeredWorker=worker;
+  var box=document.getElementById('updateNotice');
+  if(box) box.remove();
+  box=el('aside','card update-notice');
+  box.id='updateNotice'; box.setAttribute('aria-label','版本更新');
+  box.appendChild(el('strong','','有新版本可用'));
+  var now=el('button','btn sm','立即更新');
+  now.onclick=function(){
+    if(worker.state==='redundant'){ box.remove(); checkUpdate(true); return; }
+    installingUpdate=true;
+    worker.postMessage({type:'SKIP_WAITING'});
+  };
+  var later=el('button','btn ghost sm','稍後');
+  later.onclick=function(){box.remove();};
+  box.appendChild(now); box.appendChild(later); document.body.appendChild(box);
 }
-
-function forceRefresh(){
-  var done = function(){ location.replace(location.pathname + '?r=' + Date.now()); };
-  var jobs = [];
-  if('caches' in window){
-    jobs.push(caches.keys().then(function(ks){
-      return Promise.all(ks.map(function(k){ return caches.delete(k); }));
-    }));
-  }
-  if('serviceWorker' in navigator){
-    jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){
-      return Promise.all(rs.map(function(r){ return r.unregister(); }));
-    }));
-  }
-  reloading = true;
-  Promise.all(jobs).then(done, done);
+function checkUpdate(manual){
+  if(!navigator.onLine){ if(manual) toast('離線中，連線後可檢查更新'); return; }
+  if(!swReg){ if(manual) toast('尚未完成離線準備，請稍後再試'); return; }
+  if(manual) offeredWorker=null;
+  swReg.update().then(function(){
+    if(swReg.waiting) offerUpdate(swReg.waiting);
+    else if(manual) toast(swReg.installing?'正在下載版本':'已是最新版本');
+  }).catch(function(){if(manual) toast('暫時無法檢查更新');});
+}
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.addEventListener('controllerchange',function(){
+    if(installingUpdate){ installingUpdate=false; location.reload(); }
+  });
+  window.addEventListener('load',function(){
+    navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).then(function(reg){
+      swReg=reg;
+      function watch(){
+        var worker=reg.installing;
+        if(worker) worker.addEventListener('statechange',function(){
+          if(worker.state==='installed') offerUpdate(worker);
+        });
+      }
+      reg.addEventListener('updatefound',watch);
+      watch(); offerUpdate(reg.waiting);
+      window.addEventListener('online',function(){checkUpdate(false);});
+      document.addEventListener('visibilitychange',function(){if(!document.hidden) checkUpdate(false);});
+      checkUpdate(false);
+    }).catch(function(){});
+  });
 }
 window.__app = { S:S, go:go, setYM:function(v){ ym=v; renderAll(); } };
 })();

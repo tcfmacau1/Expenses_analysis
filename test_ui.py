@@ -188,18 +188,18 @@ with sync_playwright() as p:
                      tripId=None, createdAt='2026-01-01T00:00:00Z')])
     page.evaluate("window.__app.setYM('2026-08')")
     names = page.locator("#v-stats .eyebrow").all_inner_texts()
-    check("有近六個月趨勢圖", any("近六個月趨勢" in x for x in names))
+    check("有近六個月趨勢圖", any("趨勢 · 近六個月" in x for x in names))
     check("有偏差圖", any("與近三月同期的偏差" in x for x in names))
-    check("兩張圖都是 SVG", page.locator("#v-stats svg").count() == 2)
+    check("收入、支出與偏差圖都是 SVG", page.locator("#v-stats svg").count() == 3)
     st4 = page.inner_text("#v-stats")
-    check("趨勢圖標示收入與支出", "收入" in st4 and "支出均" in st4)
+    check("趨勢圖標示收入與支出", "收入均" in st4 and "支出均" in st4)
     check("趨勢圖標示旅行檢視", "不含旅行" in st4)
     check("偏差圖標出基準兩側", "低於基準" in st4 and "高於基準" in st4)
 
     seed(page, [E('s1', '2026-08-05', '餐飲', 100)])
     page.evaluate("window.__app.setYM('2026-08')")
     names2 = page.locator("#v-stats .eyebrow").all_inner_texts()
-    check("只有一個月時不畫趨勢圖", not any("近六個月趨勢" in x for x in names2))
+    check("只有一個月時不畫趨勢圖", not any("趨勢 · 近六個月" in x for x in names2))
     check("樣本不足時不畫偏差圖", not any("偏差" in x for x in names2))
 
     seed(page, [E('t%d' % i, m + '-05', '餐飲', 3000) for i, m in
@@ -362,9 +362,7 @@ with sync_playwright() as p:
     check("說明還款是資金搬運", "資金搬運" in st3)
 
     print("\n── 信用卡未還 ──")
-    check("顯示未還區塊", "信用卡未還" in st3)
-    check("未還＝900−1200＝−300", "−300.00" in st3)
-    check("揭露沒有期初餘額", "不是真實欠款總額" in st3)
+    check("已移除未還區塊", "信用卡未還" not in st3)
 
     seed(page, [E('n1', '2026-08-03', '餐飲', 900, pay='信用卡', acct='大豐銀行')])
     page.evaluate("window.__app.setYM('2026-08')")
