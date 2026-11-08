@@ -701,6 +701,33 @@
   }
 
   // ── 月報 ──────────────────────────────────────────────────────
+  function incomeReport(entries, ym, cutoff, tripMode, tripId) {
+    function income(month) {
+      return filterEntries(entries, {ym: month, type: 'income', tripMode: tripMode, tripId: tripId});
+    }
+    function period(list) {
+      return cutoff ? list.filter(function(e){ return dayOf(e.date) <= cutoff; }) : list;
+    }
+    var current = sumByCat(period(income(ym)));
+    var history = prevMonths(ym, BASELINE_MONTHS).map(income)
+      .filter(function(list){ return list.length > 0; })
+      .map(function(list){ return sumByCat(period(list)); });
+    var total = shares(current).total;
+    function comparison(name, amount, previous) {
+      var avg = history.length === BASELINE_MONTHS ? previous / BASELINE_MONTHS : null;
+      return {name: name, amount: amount, share: total ? amount / total : 0, avg: avg,
+        delta: avg === null ? null : round2(amount - avg),
+        deltaPct: avg > 0 ? (amount - avg) / avg : null};
+    }
+    var names = new Set(Object.keys(current));
+    history.forEach(function(sums){ Object.keys(sums).forEach(function(name){ names.add(name); }); });
+    var rows = Array.from(names, function(name){
+      return comparison(name, current[name] || 0, history.reduce(function(sum, m){ return sum + (m[name] || 0); }, 0));
+    }).sort(function(a,b){ return b.amount - a.amount; });
+    return {rows: rows, samples: history.length, total: comparison('收入合計', total,
+      history.reduce(function(sum, m){ return sum + shares(m).total; }, 0))};
+  }
+
   function monthReport(entries, ym, throughDay, tripMode, tripId) {
     tripMode = tripMode || 'exclude';
     var cur = filterEntries(entries, {
@@ -747,7 +774,7 @@
     ymOf: ymOf, dayOf: dayOf, shiftYM: shiftYM, prevMonths: prevMonths,
     daysInMonth: daysInMonth, todayISO: todayISO,
     toMOP: toMOP, round2: round2, accountsOf: accountsOf, acctLabel: acctLabel, isCard: isCard,
-    filterEntries: filterEntries, sumMOP: sumMOP, sumByCat: sumByCat, shares: shares,
+    incomeReport: incomeReport, filterEntries: filterEntries, sumMOP: sumMOP, sumByCat: sumByCat, shares: shares,
     baselineFor: baselineFor, anomaly: anomaly,
     balance: balance, cashBalance: cashBalance, repayments: repayments,
     cardOutstanding: cardOutstanding, cardCharged: cardCharged,

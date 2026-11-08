@@ -248,6 +248,32 @@ function accts(layer){ return C.accountsOf(S, layer); }
 /* ── 統計 ─────────────────────────────────────────────── */
 var SHADES=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
 
+function incomeCard(cutoff){
+  var report=C.incomeReport(S.entries, ym, cutoff, tripMode, onlyTripId);
+  var card=el('section','card income-report');
+  card.appendChild(el('p','eyebrow','收入構成 · 近三個月偏差'));
+  card.appendChild(el('p','tiny muted',(cutoff?'各月 1 至 '+cutoff+' 日':'各月全月')+' · 澳門元'));
+  [report.total].concat(report.rows).forEach(function(r, index){
+    var row=el('div','row');
+    var label=el('div','l');
+    label.appendChild(el('span','t',r.name));
+    if(r.avg!==null){
+      var delta=(r.delta>0?'+':'')+money(r.delta);
+      var percent=r.deltaPct===null?'基準為零':(r.deltaPct>0?'+':'')+pct(r.deltaPct);
+      label.appendChild(el('span','sub','三月均值 '+money(r.avg)+' · 差額 '+delta+'（'+percent+'）'));
+    }
+    row.appendChild(label);
+    var value=el('div','v',money(r.amount));
+    if(index) value.appendChild(el('span','sub','佔 '+pct(r.share)));
+    row.appendChild(value);
+    card.appendChild(row);
+  });
+  if(!report.total.amount) card.appendChild(el('div','tiny muted','所選期間未有已記錄收入。'));
+  if(report.samples<C.BASELINE_MONTHS) card.appendChild(el('div','note tiny muted',
+    '累積中 · 前三個月有收入紀錄的月份 '+report.samples+'/3。滿三個月後顯示偏差。'));
+  return card;
+}
+
 function renderStats(){
   var host = document.getElementById('v-stats');
   host.textContent='';
@@ -320,6 +346,8 @@ function renderStats(){
     host.appendChild(trendChart(series,'expense'));
     host.appendChild(trendChart(series,'income'));
   }
+
+  host.appendChild(incomeCard(cutoff));
 
   /* 地層剖面 */
   var sc = el('div','card');
@@ -758,6 +786,12 @@ function renderLog(){
   Array.from(names).sort(function(a,b){return a.localeCompare(b,'zh-Hant');})
     .forEach(function(name){option(merchant,name,name);});
   addField('merchant','指定商戶',merchant);
+  var category=el('select');
+  option(category,'','全部大類');
+  C.CATS.forEach(function(c){ option(category,'expense/'+c.name,'支出 · '+c.name); });
+  C.INCOME_CATS.forEach(function(c){ option(category,'income/'+c.name,'收入 · '+c.name); });
+  option(category,'transfer','轉帳');
+  addField('category','大類',category);
   var amount=el('input'); amount.type='number'; amount.min='0'; amount.step='any';
   amount.inputMode='decimal'; amount.placeholder='不限';
   addField('amount','單筆金額超過（MOP）',amount);
@@ -780,11 +814,12 @@ function renderLog(){
     var list=S.entries.filter(function(e){
       return (scope.value==='all' || C.ymOf(e.date)===ym)
         && (!query || (e.merchant||'').toLowerCase().includes(query))
+        && (!category.value || category.value===(e.type==='transfer'?'transfer':e.type+'/'+e.cat))
         && (!merchant.value || e.merchant===merchant.value)
         && (!from.value || e.date>=from.value) && (!to.value || e.date<=to.value)
         && (!amount.value || C.toMOP(e)>Number(amount.value));
     }).sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:((a.createdAt||'')<(b.createdAt||'')?1:-1)); });
-    var filtered=!!(query || merchant.value || from.value || to.value || amount.value);
+    var filtered=!!(query || category.value || merchant.value || from.value || to.value || amount.value);
     panel.querySelector('summary').textContent='搜尋及篩選'+(filtered || scope.value?' · 已套用':'');
     renderLogResults(results,list,scope.value==='all'?'全部月份':ym.replace('-',' 年 ')+' 月',filtered);
   }
