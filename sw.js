@@ -1,5 +1,5 @@
 /* 先完整下載同一版，再由使用者選擇套用更新。 */
-const BUILD = '20261108-1642';
+const BUILD = '20261108-2139';
 const CACHE = 'expanal-' + BUILD;
 const ASSETS = ['./index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 const scope = self.registration.scope;
