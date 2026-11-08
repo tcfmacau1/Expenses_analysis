@@ -8,9 +8,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="消費統計">
 <title>消費統計</title>
-<link rel="manifest" href="manifest.webmanifest?v=20260831-1608">
-<link rel="apple-touch-icon" href="icon-192.png?v=20260831-1608">
-<script>window.__BUILD='20260831-1608';</script>
+<link rel="manifest" href="manifest.webmanifest?v=20261108-1245">
+<link rel="apple-touch-icon" href="icon-192.png?v=20261108-1245">
+<script>window.__BUILD='20261108-1245';</script>
 <style>
 :root{
   /* 配色取自多啦A夢：藍、白、紅、鈴鐺黃 */
@@ -268,6 +268,12 @@ nav button[aria-pressed="true"]{color:var(--sky);font-weight:800}
   .toast{animation:rise .18s ease-out}
   @keyframes rise{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}
 }
+.log-filters{padding:14px}
+.log-filters summary{cursor:pointer;font-weight:800;color:var(--sky-deep)}
+.log-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 10px}
+.log-fields input,.log-fields select{min-width:0;font-size:16px}
+.log-filters button{margin-top:12px}
+@media(max-width:370px){.log-fields{grid-template-columns:minmax(0,1fr)}}
 </style>
 </head>
 <body>
@@ -1865,19 +1871,88 @@ function commit(){
 }
 
 /* ── 紀錄 ─────────────────────────────────────────────── */
+var logFilters = {};
+var logFiltersOpen = false;
+
 function renderLog(){
   var host=document.getElementById('v-log'); host.textContent='';
-  var list = S.entries.filter(function(e){ return C.ymOf(e.date)===ym; })
-    .sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:((a.createdAt||'')<(b.createdAt||'')?1:-1)); });
+  var panel=el('details','card log-filters');
+  panel.open=logFiltersOpen;
+  panel.ontoggle=function(){ if(panel.isConnected) logFiltersOpen=panel.open; };
+  panel.appendChild(el('summary','','搜尋及篩選'));
+  var grid=el('div','log-fields');
+  panel.appendChild(grid);
+  host.appendChild(panel);
+  var results=el('div');
+  host.appendChild(results);
 
+  function addField(key, title, control){
+    var label=lbl(title);
+    control.id='log-'+key;
+    label.htmlFor=control.id;
+    var field=el('div');
+    field.appendChild(label); field.appendChild(control); grid.appendChild(field);
+    control.value=logFilters[key] || '';
+    control.addEventListener(control.tagName==='SELECT'?'change':'input', function(){
+      logFilters[key]=control.value;
+      update();
+    });
+  }
+  function option(select, value, title){ select.add(new Option(title,value)); }
+  var scope=el('select');
+  option(scope,'','所選月份（'+ym+'）'); option(scope,'all','全部月份');
+  addField('scope','搜尋範圍',scope);
+  var keyword=el('input'); keyword.type='search'; keyword.placeholder='輸入部分商戶名稱';
+  addField('keyword','搜尋商戶',keyword);
+  var merchant=el('select');
+  option(merchant,'','全部商戶');
+  var names=new Set(S.entries.map(function(e){return e.merchant;}).filter(Boolean));
+  if(logFilters.merchant) names.add(logFilters.merchant);
+  Array.from(names).sort(function(a,b){return a.localeCompare(b,'zh-Hant');})
+    .forEach(function(name){option(merchant,name,name);});
+  addField('merchant','指定商戶',merchant);
+  var amount=el('input'); amount.type='number'; amount.min='0'; amount.step='any';
+  amount.inputMode='decimal'; amount.placeholder='不限';
+  addField('amount','單筆金額超過（MOP）',amount);
+  var from=el('input'); from.type='date'; addField('from','開始日期',from);
+  var to=el('input'); to.type='date'; addField('to','結束日期',to);
+  var clear=el('button','btn ghost sm','清除篩選');
+  clear.onclick=function(){
+    logFilters={};
+    grid.querySelectorAll('input,select').forEach(function(c){c.value='';});
+    update();
+  };
+  panel.appendChild(clear);
+  function update(){
+    var error='';
+    if(from.value && to.value && from.value>to.value) error='開始日期須早於或等於結束日期。';
+    if(!amount.validity.valid) error='請輸入零或以上的金額。';
+    results.textContent='';
+    if(error){ results.appendChild(el('p','note',error)); return; }
+    var query=keyword.value.trim().toLowerCase();
+    var list=S.entries.filter(function(e){
+      return (scope.value==='all' || C.ymOf(e.date)===ym)
+        && (!query || (e.merchant||'').toLowerCase().includes(query))
+        && (!merchant.value || e.merchant===merchant.value)
+        && (!from.value || e.date>=from.value) && (!to.value || e.date<=to.value)
+        && (!amount.value || C.toMOP(e)>Number(amount.value));
+    }).sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:((a.createdAt||'')<(b.createdAt||'')?1:-1)); });
+    var filtered=!!(query || merchant.value || from.value || to.value || amount.value);
+    panel.querySelector('summary').textContent='搜尋及篩選'+(filtered || scope.value?' · 已套用':'');
+    renderLogResults(results,list,scope.value==='all'?'全部月份':ym.replace('-',' 年 ')+' 月',filtered);
+  }
+  update();
+}
+
+function renderLogResults(host,list,period,filtered){
   var card=el('div','card');
   var totExp = C.sumMOP(list.filter(function(e){return e.type==='expense';}));
-  card.appendChild(el('p','eyebrow', ym.replace('-',' 年 ')+' 月　'+list.length+' 筆　支出合計 '+money(totExp)));
+  card.appendChild(el('p','eyebrow', period+'　'+list.length+' 筆　支出合計 '+money(totExp)));
 
   if(!list.length){
     var em=el('div','empty');
-    em.appendChild(el('div','big','這個月是空的'));
-    em.appendChild(el('div','tiny','切到「＋ 記一筆」新增，或用上方箭頭換月份。'));
+    em.appendChild(el('div','big',filtered?'沒有符合條件的紀錄':period+'沒有紀錄'));
+    em.appendChild(el('div','tiny',filtered?'可調整搜尋條件，或將搜尋範圍改為全部月份。':'切到「＋ 記一筆」新增紀錄。'));
     card.appendChild(em);
   } else {
     var byDay={};
@@ -2455,3 +2530,4 @@ window.__app = { S:S, go:go, setYM:function(v){ ym=v; renderAll(); } };
 </script>
 </body>
 </html>
+

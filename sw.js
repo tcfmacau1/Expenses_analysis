@@ -1,7 +1,7 @@
 /* 消費統計 — 離線快取
    BUILD 由 build.py 每次組建自動改寫，快取名稱跟著換，舊快取在 activate 時清掉。
    HTML 走網路優先：有網一定拿到新版，沒網才回快取。圖示與 manifest 走快取優先。 */
-const BUILD = '20260831-1608';
+const BUILD = '20261108-1245';
 const CACHE = 'expanal-' + BUILD;
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
@@ -59,3 +59,4 @@ self.addEventListener('fetch', e => {
 self.addEventListener('message', e => {
   if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
+
